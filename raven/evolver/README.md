@@ -8,6 +8,21 @@ generalisation number. The methodology is specified in
 `docs/specs/self-evolution-loop-sop.md` (the SOP) and mapped to this codebase
 in `docs/specs/self-evolution-loop-raven-mapping.md`.
 
+## Paper
+
+**Self-Evolving Agent Harnesses via Gated Semantic Quality-Diversity**  
+Xiaotian Luo, Fengxingyu Wang, Chuanrui Hu, Dizhan Xue, Yafeng Deng.  
+arXiv:2607.13683 — <https://arxiv.org/abs/2607.13683>
+
+```bibtex
+@article{luo2026selfevolving,
+  title   = {Self-Evolving Agent Harnesses via Gated Semantic Quality-Diversity},
+  author  = {Luo, Xiaotian and Wang, Fengxingyu and Hu, Chuanrui and Xue, Dizhan and Deng, Yafeng},
+  journal = {arXiv preprint arXiv:2607.13683},
+  year    = {2026}
+}
+```
+
 ## Two ways to run self-evolution
 
 The SOP is the methodology; this package is one executor of it. There are two:
