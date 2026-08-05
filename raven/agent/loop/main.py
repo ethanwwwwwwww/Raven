@@ -348,8 +348,14 @@ class AgentLoop:
         "(format, size limits, value ranges, ordering, naming)? Are the edge "
         "cases the task calls out actually handled? Where you can, run a "
         "concrete command to verify each (inspect the file, check its size, "
-        "exercise a boundary input) rather than assuming. If everything checks "
-        "out, reply TASK_COMPLETE again. If any check fails, fix it first."
+        "exercise a boundary input) rather than assuming. "
+        "If your deliverable produces output at runtime, confirm it from a "
+        "clean state: remove any scratch or demo files you created while "
+        "working and run it fresh, so leftover state cannot make a broken "
+        "result look correct. "
+        "If you have already verified each requirement this way, reply "
+        "TASK_COMPLETE again — do not redo work or change a solution that "
+        "already checks out. If any check fails, fix it first."
     )
     # Soft completion reminders (opt-in via RAVEN_GATE_STALE / RAVEN_GATE_RED,
     # both require RAVEN_REQUIRE_REAL_TEST_EVIDENCE). Design contract: fire at
