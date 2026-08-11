@@ -112,7 +112,7 @@ def test_create_prints_id(patched_workspace: Path) -> None:
 def test_create_lazy_no_file(patched_workspace: Path) -> None:
     r = runner.invoke(session_app, ["create"])
     assert r.exit_code == 0
-    sessions_dir = patched_workspace / "sessions" / "cli"
+    sessions_dir = SessionManager(patched_workspace).sessions_dir / "cli"
     assert not sessions_dir.exists() or not list(sessions_dir.glob("*.jsonl")), (
         "bare `session create` must not write a file (lazy)"
     )
@@ -121,7 +121,7 @@ def test_create_lazy_no_file(patched_workspace: Path) -> None:
 def test_create_with_title_persists(patched_workspace: Path) -> None:
     r = runner.invoke(session_app, ["create", "--title", "My Session"])
     assert r.exit_code == 0
-    sessions_dir = patched_workspace / "sessions" / "cli"
+    sessions_dir = SessionManager(patched_workspace).sessions_dir / "cli"
     jsonl_files = list(sessions_dir.glob("*.jsonl")) if sessions_dir.exists() else []
     assert jsonl_files, "`session create --title` must persist metadata immediately"
 

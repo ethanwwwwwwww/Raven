@@ -19,6 +19,7 @@ import pytest
 
 from raven.agent.loop import AgentLoop
 from raven.providers.base import LLMProvider, LLMResponse
+from raven.session.manager import SessionManager
 from raven.spine.message import ChatType, Source
 from raven.spine.turn import Origin, TurnRequest
 
@@ -76,7 +77,7 @@ def _make_msg(content: str = "hello") -> TurnRequest:
 
 
 def _persisted_messages(workspace: Path) -> list[dict[str, Any]]:
-    path = workspace / "sessions" / "tui" / "chat1.jsonl"
+    path = SessionManager(workspace).sessions_dir / "tui" / "chat1.jsonl"
     assert path.exists(), "session file was not persisted"
     records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     return [r for r in records if r.get("_type") != "metadata"]

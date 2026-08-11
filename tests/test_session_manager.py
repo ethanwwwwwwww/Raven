@@ -6,10 +6,16 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from raven.config.loader import get_config_path
 from raven.session.manager import Session, SessionManager, new_chat_id
 
 
-def _turn_worker(workspace_str: str, key: str, writer_id: int) -> None:
+def _turn_worker(workspace_str: str, key: str, writer_id: int, config_path: str) -> None:
+    # A spawned process starts with a fresh interpreter: the parent's config
+    # context is gone, and the session directory is derived from it.
+    from raven.config import loader
+
+    loader.set_config_path(Path(config_path))
     mgr = SessionManager(Path(workspace_str))
     session = mgr.get_or_create(key)
     session.add_message("user", f"q-{writer_id}")
@@ -42,13 +48,13 @@ def test_save_writes_nested_channel_path(tmp_path: Path):
     session = mgr.get_or_create("tui:20260610_143052_a1b2c3")
     session.add_message("user", "hi")
     mgr.save(session)
-    assert (tmp_path / "sessions" / "tui" / "20260610_143052_a1b2c3.jsonl").exists()
+    assert (mgr.sessions_dir / "tui" / "20260610_143052_a1b2c3.jsonl").exists()
 
 
 def test_key_from_path_reverses_nested_encoding(tmp_path: Path):
     """key_from_path maps sessions/{channel}/{chat_id}.jsonl back to
     channel:chat_id; a chat_id containing an underscore is preserved verbatim."""
-    path = tmp_path / "sessions" / "telegram" / "user_42.jsonl"
+    path = SessionManager(tmp_path).sessions_dir / "telegram" / "user_42.jsonl"
     assert SessionManager.key_from_path(path) == "telegram:user_42"
 
 
@@ -58,7 +64,7 @@ def test_deterministic_chat_id_maps_uniformly(tmp_path: Path):
     session = mgr.get_or_create("cron:morning_brief")
     session.add_message("user", "ping")
     mgr.save(session)
-    assert (tmp_path / "sessions" / "cron" / "morning_brief.jsonl").exists()
+    assert (mgr.sessions_dir / "cron" / "morning_brief.jsonl").exists()
 
 
 def test_roundtrip_load_from_nested_path(tmp_path: Path):
@@ -94,7 +100,7 @@ def test_save_reserves_metadata_keys(tmp_path: Path):
     session.add_message("user", "x")
     mgr.save(session)
 
-    first_line = (tmp_path / "sessions" / "tui" / "meta01.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    first_line = (mgr.sessions_dir / "tui" / "meta01.jsonl").read_text(encoding="utf-8").splitlines()[0]
     meta = json.loads(first_line)["metadata"]
     assert meta["channel"] == "tui"
     assert meta["chat_id"] == "meta01"
@@ -105,7 +111,7 @@ def test_save_reserves_metadata_keys(tmp_path: Path):
 
 def test_load_preserves_on_disk_message_order(tmp_path: Path):
     """Messages keep file order on load even when received_at is out of order."""
-    session_dir = tmp_path / "sessions" / "tui"
+    session_dir = SessionManager(tmp_path).sessions_dir / "tui"
     session_dir.mkdir(parents=True)
     lines = [
         {"_type": "metadata", "key": "tui:order01", "metadata": {}},
@@ -122,12 +128,12 @@ def test_created_session_is_lazy_until_first_save(tmp_path: Path):
     """get_or_create materializes no file; the session is absent from list."""
     mgr = SessionManager(tmp_path)
     session = mgr.get_or_create("tui:lazy01")
-    assert not (tmp_path / "sessions" / "tui" / "lazy01.jsonl").exists()
+    assert not (mgr.sessions_dir / "tui" / "lazy01.jsonl").exists()
     assert mgr.list_sessions() == []
 
     session.add_message("user", "first")
     mgr.save(session)
-    assert (tmp_path / "sessions" / "tui" / "lazy01.jsonl").exists()
+    assert (mgr.sessions_dir / "tui" / "lazy01.jsonl").exists()
     assert [info["key"] for info in mgr.list_sessions()] == ["tui:lazy01"]
 
 
@@ -144,7 +150,7 @@ def test_list_sessions_sees_nested_layout(tmp_path: Path):
 
 
 def _seed_nested(tmp_path: Path, channel: str, chat_id: str, updated_at: str) -> Path:
-    channel_dir = tmp_path / "sessions" / channel
+    channel_dir = SessionManager(tmp_path).sessions_dir / channel
     channel_dir.mkdir(parents=True, exist_ok=True)
     path = channel_dir / f"{chat_id}.jsonl"
     meta = {
@@ -172,7 +178,7 @@ def test_find_most_recent_chat_id_nested_by_updated_at(tmp_path: Path):
 def test_find_most_recent_ignores_old_flat_files(tmp_path: Path):
     """Pre-refactor flat files are ignored for lookup but never deleted."""
     _seed_nested(tmp_path, "tui", "nested01", "2026-06-10T10:00:00")
-    flat = tmp_path / "sessions" / "tui_flat01.jsonl"
+    flat = SessionManager(tmp_path).sessions_dir / "tui_flat01.jsonl"
     flat.write_text(
         json.dumps(
             {
@@ -197,7 +203,7 @@ def test_save_appends_instead_of_rewriting(tmp_path: Path):
     session = mgr.get_or_create("tui:app01")
     session.add_message("user", "q1")
     mgr.save(session)
-    path = tmp_path / "sessions" / "tui" / "app01.jsonl"
+    path = mgr.sessions_dir / "tui" / "app01.jsonl"
     first_save = path.read_text(encoding="utf-8")
 
     session.add_message("assistant", "a1")
@@ -216,7 +222,7 @@ def test_no_lock_sidecar_beside_session_jsonl(tmp_path: Path):
     session.add_message("user", "x")
     mgr.save(session)
 
-    channel_dir = tmp_path / "sessions" / "tui"
+    channel_dir = mgr.sessions_dir / "tui"
     beside = [p.name for p in channel_dir.iterdir() if p.is_file() and p.name.endswith(".lock")]
     assert beside == []
     assert (channel_dir / ".lock" / "lock01.jsonl.lock").exists()
@@ -248,7 +254,8 @@ def test_concurrent_writers_lose_no_turns(tmp_path: Path):
     # spawn, not the Linux default fork: pytest leaves the parent multi-threaded,
     # and forking from there segfaults the interpreter at exit.
     ctx = multiprocessing.get_context("spawn")
-    procs = [ctx.Process(target=_turn_worker, args=(str(tmp_path), key, w)) for w in range(2)]
+    cfg = str(get_config_path())
+    procs = [ctx.Process(target=_turn_worker, args=(str(tmp_path), key, w, cfg)) for w in range(2)]
     for p in procs:
         p.start()
     for p in procs:
@@ -280,7 +287,7 @@ def test_find_most_recent_reflects_latest_append(tmp_path: Path):
 
 def test_loader_skips_partial_trailing_line(tmp_path: Path):
     """A crash mid-append leaves a partial trailing line; loader skips it."""
-    session_dir = tmp_path / "sessions" / "tui"
+    session_dir = SessionManager(tmp_path).sessions_dir / "tui"
     session_dir.mkdir(parents=True)
     full = json.dumps({"role": "user", "content": "full"})
     (session_dir / "crash01.jsonl").write_text(
@@ -330,7 +337,7 @@ def test_delete_removes_file_and_returns_true(tmp_path: Path):
     session = mgr.get_or_create("tui:del01")
     session.add_message("user", "hi")
     mgr.save(session)
-    path = tmp_path / "sessions" / "tui" / "del01.jsonl"
+    path = mgr.sessions_dir / "tui" / "del01.jsonl"
     assert path.exists()
 
     result = mgr.delete("tui:del01")
@@ -380,8 +387,8 @@ def test_delete_does_not_touch_other_sessions(tmp_path: Path):
         mgr.save(s)
 
     mgr.delete("tui:del03")
-    assert (tmp_path / "sessions" / "tui" / "keep01.jsonl").exists()
-    assert not (tmp_path / "sessions" / "tui" / "del03.jsonl").exists()
+    assert (mgr.sessions_dir / "tui" / "keep01.jsonl").exists()
+    assert not (mgr.sessions_dir / "tui" / "del03.jsonl").exists()
 
 
 def test_peek_returns_cached_session_without_extra_load(tmp_path: Path):
@@ -426,7 +433,7 @@ def test_flush_saves_dirty_session(tmp_path: Path):
 
     assert mgr.flush("tui:flush01") is True
 
-    path = tmp_path / "sessions" / "tui" / "flush01.jsonl"
+    path = mgr.sessions_dir / "tui" / "flush01.jsonl"
     lines = [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
     msg_lines = [ln for ln in lines if ln.get("_type") != "metadata"]
     assert len(msg_lines) == 2
@@ -438,7 +445,7 @@ def test_flush_skips_clean_session(tmp_path: Path):
     session = mgr.get_or_create("tui:flush02")
     session.add_message("user", "saved")
     mgr.save(session)
-    path = tmp_path / "sessions" / "tui" / "flush02.jsonl"
+    path = mgr.sessions_dir / "tui" / "flush02.jsonl"
     before = path.read_text()
 
     assert mgr.flush("tui:flush02") is True

@@ -275,7 +275,7 @@ async def test_session_resume_skips_malformed_stored_lines(tmp_path: Path, monke
     cfg.agents.defaults.workspace = str(tmp_path)
     monkeypatch.setattr(session_module, "load_config", lambda: cfg)
 
-    session_path = tmp_path / "sessions" / "tui" / "20260610_143052_445566.jsonl"
+    session_path = SessionManager(tmp_path).sessions_dir / "tui" / "20260610_143052_445566.jsonl"
     session_path.parent.mkdir(parents=True)
     session_path.write_text(
         json.dumps({"role": "user", "content": "hello"})
@@ -350,7 +350,7 @@ async def test_session_resume_unknown_id_does_not_create_file(tmp_path: Path, mo
     cfg.agents.defaults.workspace = str(tmp_path)
     monkeypatch.setattr(session_module, "load_config", lambda: cfg)
 
-    sessions_dir = tmp_path / "sessions"
+    sessions_dir = SessionManager(tmp_path).sessions_dir
     before = set(sessions_dir.rglob("*")) if sessions_dir.exists() else set()
 
     await session_resume({"session_id": "tui:totally_unknown_id"})
@@ -383,7 +383,7 @@ async def test_session_close_flushes_dirty_cached_session(tmp_path: Path, monkey
     result = await session_close({"session_id": session_key})
     assert result == {"ok": True}
 
-    session_path = tmp_path / "sessions" / "tui" / "20260610_143052_ccddee.jsonl"
+    session_path = SessionManager(tmp_path).sessions_dir / "tui" / "20260610_143052_ccddee.jsonl"
     assert session_path.exists()
     lines = [json.loads(ln) for ln in session_path.read_text().splitlines() if ln.strip()]
     msg_lines = [ln for ln in lines if ln.get("_type") != "metadata"]
@@ -603,7 +603,7 @@ async def test_session_delete_removes_session(tmp_path: Path, monkeypatch: pytes
 
     result = await session_delete({"session_id": "tui:20260610_100000_rm01"})
     assert result == {"deleted": "tui:20260610_100000_rm01"}
-    path = tmp_path / "sessions" / "tui" / "20260610_100000_rm01.jsonl"
+    path = SessionManager(tmp_path).sessions_dir / "tui" / "20260610_100000_rm01.jsonl"
     assert not path.exists()
 
 
@@ -723,7 +723,7 @@ async def test_session_title_on_fresh_session_is_pending_and_writes_no_file(
     assert result["title"] == "Early"
     assert result["pending"] is True
 
-    sessions_dir = tmp_path / "sessions"
+    sessions_dir = SessionManager(tmp_path).sessions_dir
     files = [p for p in sessions_dir.rglob("*") if p.is_file()] if sessions_dir.exists() else []
     assert not files, f"lazy title must not write files; got: {files}"
 
