@@ -334,7 +334,28 @@ class LiteLLMProvider(LLMProvider):
 
             if "tool_call_id" in clean and clean["tool_call_id"]:
                 clean["tool_call_id"] = map_id(clean["tool_call_id"])
-        return sanitized
+        return LiteLLMProvider._backfill_reasoning_keys(sanitized)
+
+    @staticmethod
+    def _backfill_reasoning_keys(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Give every assistant message a reasoning_content key once any of them has one.
+
+        DeepSeek 官方端点的 thinking 模式要求历史里的助手消息**必须带** reasoning_content
+        键,缺键直接 400("must be passed back to the API")。而模型自己就会在连续操作的
+        快轮次返回不带该字段的 tool_call 响应——原样回传即触发 400(2026-08-11 WorkBuddy
+        全量真机:240 个 attempt 里 218 个被掐断)。契约探针实测:键在但值为空串 → 200,
+        缺键 → 400。所以只补空串,不伪造推理内容。
+
+        只在本次消息列表已经出现过 reasoning_content(对话明显处于 thinking 模式)时才补,
+        非 thinking 对话保持原样——不给从没见过这个字段的端点塞新键。这同时覆盖
+        prune_old_reasoning(紧急收缩)剥掉老推理后的请求。
+        """
+        if not any(m.get("role") == "assistant" and m.get("reasoning_content") is not None for m in messages):
+            return messages
+        for m in messages:
+            if m.get("role") == "assistant" and m.get("reasoning_content") is None:
+                m["reasoning_content"] = ""
+        return messages
 
     def _mirror_reasoning_for_gateway(self, kwargs: dict[str, Any], reasoning_effort: str) -> None:
         """Keep reasoning_effort alive past litellm's drop_params.
