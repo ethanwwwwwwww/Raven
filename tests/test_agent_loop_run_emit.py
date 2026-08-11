@@ -483,7 +483,12 @@ async def test_mid_session_promotion_streams_on_the_promoting_turn(tmp_path, mon
     # receipt), not just next turn. If promotion moved after the wiring, the
     # promoted tool would miss the callback and this progress event would vanish.
     monkeypatch.delenv("MIROTHINKER_API_KEY", raising=False)
-    loop = AgentLoop(provider=_dr_stream_provider(), workspace=tmp_path, deep_research_config=DeepResearchToolConfig())
+    loop = AgentLoop(
+        provider=_dr_stream_provider(),
+        workspace=tmp_path,
+        deep_research_config=DeepResearchToolConfig(),
+        web_enabled=True,
+    )
     _stub_edges(loop)
     assert isinstance(loop.tools.get("deep_research"), DeepResearchOfferTool)  # starts unconfigured
 

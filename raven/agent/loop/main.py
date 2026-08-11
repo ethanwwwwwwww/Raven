@@ -424,6 +424,7 @@ class AgentLoop:
         context_window_tokens: int = 65_536,
         brave_api_key: str | None = None,
         web_proxy: str | None = None,
+        web_enabled: bool = False,
         exec_config: ExecToolConfig | None = None,
         cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
@@ -510,6 +511,7 @@ class AgentLoop:
         self.brave_api_key = brave_api_key
         self.jina_api_key = jina_api_key
         self.web_proxy = web_proxy
+        self.web_enabled = web_enabled
         from raven.config.schema import DeepResearchToolConfig, MediaGenConfig
 
         self.media_config = media_config or MediaGenConfig()
@@ -655,6 +657,7 @@ class AgentLoop:
             brave_api_key=brave_api_key,
             jina_api_key=jina_api_key,
             web_proxy=web_proxy,
+            web_enabled=web_enabled,
             exec_config=self.exec_config,
             restrict_to_workspace=restrict_to_workspace,
             sandbox_config=sandbox_config,
@@ -820,16 +823,19 @@ class AgentLoop:
             self.tools.register(JobStatusTool(self._background_jobs))
             self.tools.register(JobWaitTool(self._background_jobs))
             self.tools.register(JobCancelTool(self._background_jobs))
-        # web_search only exists when it can actually run: advertising a tool
-        # whose every call fails "API key not configured" wastes turns and
-        # teaches the model a dead path (17/17 failed calls in one TB run).
-        # web_fetch stays unconditional — Jina Reader works keyless.
-        web_search = WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy)
-        if web_search.api_key:
-            self.tools.register(web_search)
+        # A tool that cannot run must never be advertised: every call failing
+        # wastes turns and teaches the model a dead path (17/17 failed calls in
+        # one TB run gated web_search on its API key). The same holds for every
+        # web call in an offline sandbox, so the whole group is opt-in.
+        if self.web_enabled:
+            web_search = WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy)
+            if web_search.api_key:
+                self.tools.register(web_search)
+            else:
+                logger.info("web_search not registered: no Serper API key configured")
+            self.tools.register(WebFetchTool(api_key=self.jina_api_key, proxy=self.web_proxy))
         else:
-            logger.info("web_search not registered: no Serper API key configured")
-        self.tools.register(WebFetchTool(api_key=self.jina_api_key, proxy=self.web_proxy))
+            logger.info("web tools not registered: tools.web.enabled is false")
         # Media tools (image/speech/video) are opt-in: a tool is registered only
         # when the user configured it (a model or apiKey under tools.media.<tool>),
         # which Config.effective_media_config() surfaces as a resolved key/model.
@@ -854,6 +860,8 @@ class AgentLoop:
         # never a plain default tool. Two modes: ``real`` (key configured) is the
         # working tool + async manager; ``offer`` (no key) is a same-named stand-in
         # that, on a research query, asks the user deep-vs-regular and guides setup.
+        # The offer stand-in rides on the web-tools switch: it exists to sell an
+        # unconfigured engine, which is noise for an agent that cannot browse.
         self.deep_research_manager: DeepResearchManager | None = None
         # The async-delivery submit handle (gateway-wired, post-construction). Kept
         # on the loop so a manager built later by promotion inherits it too, rather
@@ -865,21 +873,17 @@ class AgentLoop:
         self._deep_research_broker: QuestionBroker | None = None
         if deep_research_mode(self.deep_research_config) == "real":
             self._register_real_deep_research(self.deep_research_config)
-        else:
+        elif self.web_enabled:
             self.tools.register(DeepResearchOfferTool())
         self.tools.register(TodoWriteTool(self._todos))
         self.tools.register(SpawnTool(manager=self.subagents))
         # The QuestionBroker is a per-transport singleton, late-bound via
         # set_broker once the transport (TUI RPC server / gateway hub) exists.
         self.tools.register(AskUserTool())
-        if self.cron_service:
-            # Lazy import: CronTool lives under raven.proactive_engine.schedulers.cron.tool
-            # which (a) imports raven.agent.tools.base, triggering raven.agent.__init__,
-            # which (b) imports this very loop module. Importing at function scope breaks the
-            # cycle since loop.py is fully loaded by the time _register_default_tools runs.
-            from raven.proactive_engine.schedulers.cron.tool import CronTool
-
-            self.tools.register(CronTool(self.cron_service))
+        # ``cron`` is not a default tool: scheduling reminders is orthogonal to the
+        # work a coding agent does, and its schema is the largest of any tool here.
+        # ``CronService`` still runs, so jobs added through the CLI keep firing --
+        # only the agent's ability to schedule new ones is gone.
 
         # Plugin-contributed tools (e.g. EverOS's ``understand_media``).
         # Registered last so a plugin can override a built-in by name if
@@ -3097,7 +3101,6 @@ class AgentLoop:
         ``drain`` pulls user messages injected mid-turn (BusyPolicy.INJECT); it
         is threaded into the agent loop and consumed at the top of each iteration.
         """
-        from raven.proactive_engine.schedulers.cron.tool import CronTool
         from raven.spine.events import (
             EpisodeStart,
             MediaOut,
@@ -3215,15 +3218,6 @@ class AgentLoop:
 
                 dr_tool.set_stream_callback(_route_deep_research)
 
-        # A CRON turn must not let the agent schedule new cron jobs mid-run. The
-        # CronTool guards via a ContextVar; set it here, in the lane task that runs
-        # the turn, so it propagates to the tool — the cron callback sets it in a
-        # different task that never reaches this one.
-        cron_tool = self.tools.get("cron")
-        cron_token = None
-        if req.origin is Origin.CRON and isinstance(cron_tool, CronTool):
-            cron_token = cron_tool.set_cron_context(True)
-
         if usage_sink is None:
             usage_sink = {}
         try:
@@ -3244,9 +3238,6 @@ class AgentLoop:
         except Exception:
             await self.close_executor()
             raise
-        finally:
-            if cron_token is not None and isinstance(cron_tool, CronTool):
-                cron_tool.reset_cron_context(cron_token)
 
         # Single return->emit boundary (N-UNIFORM). MediaOut is independent of the
         # stream and precedes Text (G-MEDIA-2(a): the current order is media-first).

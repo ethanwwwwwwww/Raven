@@ -44,6 +44,7 @@ class SubagentManager:
         model: str | None = None,
         brave_api_key: str | None = None,
         web_proxy: str | None = None,
+        web_enabled: bool = False,
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
         sandbox_config: "SandboxConfig | None" = None,
@@ -68,6 +69,7 @@ class SubagentManager:
         self.brave_api_key = brave_api_key
         self.jina_api_key = jina_api_key
         self.web_proxy = web_proxy
+        self.web_enabled = web_enabled
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self._wrap_tool_outputs = wrap_tool_outputs
@@ -197,8 +199,11 @@ class SubagentManager:
             )
             tools.register(ExecWriteTool(exec_sessions))
             tools.register(ExecReadTool(exec_sessions, jobs=exec_jobs))
-            tools.register(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
-            tools.register(WebFetchTool(api_key=self.jina_api_key, proxy=self.web_proxy))
+            if self.web_enabled:
+                web_search = WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy)
+                if web_search.api_key:
+                    tools.register(web_search)
+                tools.register(WebFetchTool(api_key=self.jina_api_key, proxy=self.web_proxy))
 
             system_prompt = self._build_subagent_prompt()
             messages: list[dict[str, Any]] = [
