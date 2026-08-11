@@ -450,7 +450,12 @@ class _StubProvider:
 
 def _offer_loop(tmp_path: Path) -> AgentLoop:
     """A loop that starts unconfigured, so the offer stand-in is registered."""
-    return AgentLoop(provider=_StubProvider(), workspace=tmp_path, deep_research_config=DeepResearchToolConfig())
+    return AgentLoop(
+        provider=_StubProvider(),
+        workspace=tmp_path,
+        deep_research_config=DeepResearchToolConfig(),
+        web_enabled=True,
+    )
 
 
 def test_promote_swaps_offer_for_real_when_key_appears(tmp_path: Path, monkeypatch):

@@ -106,15 +106,16 @@ def patched_tui_build_deps(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
 def test_tui_agent_loop_receives_cron_service(patched_tui_build_deps) -> None:
     """``_build_tui_agent_loop`` SHALL pass a ``CronService`` instance to
-    ``AgentLoop(cron_service=...)`` so that ``CronTool`` auto-registers
-    per ``agent/loop/main.py:314-321``.
+    ``AgentLoop(cron_service=...)`` so scheduled jobs keep firing in the TUI.
+    The service no longer registers a ``cron`` tool -- the agent cannot add
+    jobs itself, only the CLI can.
     """
     from raven.cli.tui_commands import _build_tui_agent_loop
 
     _build_tui_agent_loop()
 
     kwargs = patched_tui_build_deps["agent_loop_kwargs"]
-    assert "cron_service" in kwargs, "AgentLoop ctor must receive cron_service kwarg for CronTool auto-register"
+    assert "cron_service" in kwargs, "AgentLoop ctor must receive the cron_service kwarg so scheduled jobs fire"
     assert kwargs["cron_service"] is not None
     cls = patched_tui_build_deps["cron_service_class"]
     assert isinstance(kwargs["cron_service"], cls)

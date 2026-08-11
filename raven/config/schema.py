@@ -652,6 +652,10 @@ class WebSearchConfig(Base):
 class WebToolsConfig(Base):
     """Web tools configuration."""
 
+    # Off by default: a coding agent works inside a checkout, and in an offline
+    # sandbox every web call fails, which only teaches the model a dead path.
+    # Set true to get web_search (still needs a Serper key) and web_fetch back.
+    enabled: bool = False
     proxy: str | None = None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
     jina_api_key: str = ""  # Jina Reader API key
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)
