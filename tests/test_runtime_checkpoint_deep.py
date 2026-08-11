@@ -502,10 +502,21 @@ async def test_d7_gc_invoked_every_n_commits(workspace, monkeypatch):
 # =============================================================================
 
 
-async def test_d8_one_shot_mode_creates_no_shadow_dir(workspace):
+async def test_d8_one_shot_mode_creates_no_shadow_dir(workspace, monkeypatch):
     """S3 end-to-end: ``interactive=False`` + default policy means
     ``raven agent -m "..."`` leaves no ``.raven/`` artifact on disk —
-    one-shot commands don't pay the shadow-git cost."""
+    one-shot commands don't pay the shadow-git cost.
+
+    The completion gates default to on in one-shot mode and would consume the
+    stub provider's canned replies on nudges; this test is about the checkpoint
+    artifact, so it opts them out to keep its subject isolated.
+    """
+    for switch in (
+        "RAVEN_REQUIRE_REAL_TEST_EVIDENCE",
+        "RAVEN_VERIFY_BEFORE_COMPLETE",
+        "RAVEN_GATE_EMPTY_DIFF",
+    ):
+        monkeypatch.setenv(switch, "off")
     agent = _agent(workspace, policy="interactive", interactive=False)
     _f, _u, _m, outcome = await agent._run_agent_loop(
         [{"role": "user", "content": "go"}],

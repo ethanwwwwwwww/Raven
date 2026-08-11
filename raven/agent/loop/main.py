@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import time
 from contextlib import AsyncExitStack, aclosing
@@ -17,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from loguru import logger
 
 from raven.agent.context import ContextBuilder
-from raven.agent.loop import compaction
+from raven.agent.loop import compaction, completion_gates
 from raven.agent.loop.recovery import (
     LENGTH_NUDGE,
     POST_TOOL_NUDGE,
@@ -108,6 +107,13 @@ class TurnOutcome:
     status: str = "completed"  # "completed" | "interrupted" | "error"
     checkpoint_id: str | None = None
     edited_files: list[str] = field(default_factory=list)
+    gate_triggers: dict[str, int] = field(default_factory=dict)
+
+
+def format_gate_counters(counters: dict[str, int]) -> str:
+    """One stable line summarising which completion gates fired this turn."""
+    fired = " ".join(f"{name}={n}" for name, n in sorted(counters.items()) if n)
+    return f"gate_triggers: {fired or 'none'}"
 
 
 def _filter_qualified_ids(
@@ -1980,22 +1986,37 @@ class AgentLoop:
         call_max_tokens: int | None = None
         length_nudges = 0
         time_budget = TimeBudgetReminder.from_env(time.time())
-        test_gate_enabled = bool(os.environ.get("RAVEN_REQUIRE_REAL_TEST_EVIDENCE"))
+        # Guardrails default on for one-shot task runs (what an evaluation harness
+        # drives) and off in interactive sessions, where finishing a turn usually
+        # means answering rather than changing code. Env vars override either way.
+        gates_default = not self.interactive
+        test_gate_enabled = completion_gates.gate_enabled("RAVEN_REQUIRE_REAL_TEST_EVIDENCE", gates_default)
         real_test_evidence = False
         test_gate_nudges = 0
-        verify_complete_enabled = bool(os.environ.get("RAVEN_VERIFY_BEFORE_COMPLETE"))
+        verify_complete_enabled = completion_gates.gate_enabled("RAVEN_VERIFY_BEFORE_COMPLETE", gates_default)
         verify_complete_nudged = False
         # Evidence ledger for the soft completion reminders: what the latest
         # real-test run said (red/green/None=unparseable), and which non-doc
         # files were edited AFTER it (staleness). Both reminders are one-shot.
-        gate_stale_enabled = test_gate_enabled and bool(os.environ.get("RAVEN_GATE_STALE"))
-        gate_red_enabled = test_gate_enabled and bool(os.environ.get("RAVEN_GATE_RED"))
+        gate_stale_enabled = test_gate_enabled and completion_gates.gate_enabled("RAVEN_GATE_STALE", gates_default)
+        gate_red_enabled = test_gate_enabled and completion_gates.gate_enabled("RAVEN_GATE_RED", gates_default)
         last_test_status: str | None = None
         last_test_cmd = ""
         last_test_detail = ""
         edits_since_test: list[str] = []
         stale_nudged = False
         red_nudged = False
+        # Empty-diff falsification gate (2026-08, trajectory error analysis across two
+        # model rounds). Same conventions as the four gates above: turn-local, one-shot,
+        # facts only, on unless opted out.
+        empty_diff_gate_enabled = completion_gates.gate_enabled(completion_gates.EMPTY_DIFF_ENV, gates_default)
+        turn_code_edits = False
+        empty_diff_nudged = False
+        # How often each gate fired this turn. Rides on TurnOutcome so a run can be
+        # summarised without parsing the transcript: loguru is disabled inside the
+        # ``raven`` package unless ``--logs`` is passed, so gate logs alone never
+        # reach a batch run's captured output.
+        gate_triggers: dict[str, int] = {}
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -2275,7 +2296,7 @@ class AgentLoop:
                             last_test_cmd = cmd.replace("\n", " ")[:200]
                             edits_since_test = []
                     elif (
-                        (gate_stale_enabled or gate_red_enabled)
+                        (gate_stale_enabled or gate_red_enabled or empty_diff_gate_enabled)
                         and executed_name in ("write_file", "edit_file")
                         and not _is_hard_tool_failure(model_text)
                     ):
@@ -2285,7 +2306,8 @@ class AgentLoop:
                             and not self._GATE_DOC_PATH_RE.search(path)
                             and not self._GATE_SCRATCH_PATH_RE.search(path)
                         ):
-                            if path not in edits_since_test:
+                            turn_code_edits = True
+                            if (gate_stale_enabled or gate_red_enabled) and path not in edits_since_test:
                                 edits_since_test.append(path)
                     # The log stays one line; the UI event keeps newlines so a
                     # tool that reports several items (e.g. ask_user's
@@ -2446,6 +2468,7 @@ class AgentLoop:
                     and iteration < self.max_iterations
                 ):
                     test_gate_nudges += 1
+                    gate_triggers["test_evidence"] = gate_triggers.get("test_evidence", 0) + 1
                     logger.warning(
                         "test-evidence gate: refusing final answer without a real test run (nudge {}/{})",
                         test_gate_nudges,
@@ -2456,6 +2479,7 @@ class AgentLoop:
                     continue
                 if verify_complete_enabled and not verify_complete_nudged and iteration < self.max_iterations:
                     verify_complete_nudged = True
+                    gate_triggers["verify_complete"] = gate_triggers.get("verify_complete", 0) + 1
                     logger.info(
                         "verify-before-complete gate: one-shot requirement re-check nudge before accepting completion"
                     )
@@ -2474,6 +2498,7 @@ class AgentLoop:
                     and iteration < self.max_iterations
                 ):
                     stale_nudged = True
+                    gate_triggers["test_stale"] = gate_triggers.get("test_stale", 0) + 1
                     logger.info(
                         "test-evidence gate: stale reminder (edits after last test: {})",
                         edits_since_test,
@@ -2498,6 +2523,7 @@ class AgentLoop:
                     and iteration < self.max_iterations
                 ):
                     red_nudged = True
+                    gate_triggers["test_red"] = gate_triggers.get("test_red", 0) + 1
                     logger.info(
                         "test-evidence gate: red inquiry (last test failed: {})",
                         last_test_detail,
@@ -2511,6 +2537,22 @@ class AgentLoop:
                             ),
                         }
                     )
+                    prev_had_tool_calls = False
+                    continue
+                empty_nudge = completion_gates.empty_diff_nudge(
+                    enabled=empty_diff_gate_enabled,
+                    code_edits_observed=turn_code_edits,
+                    already_nudged=empty_diff_nudged,
+                    iteration=iteration,
+                    max_iterations=self.max_iterations,
+                )
+                if empty_nudge:
+                    empty_diff_nudged = True
+                    gate_triggers["empty_diff"] = gate_triggers.get("empty_diff", 0) + 1
+                    logger.info(
+                        "empty-diff gate: finishing with no repository edits observed; asking for falsification evidence"
+                    )
+                    messages.append({"role": "user", "content": empty_nudge})
                     prev_had_tool_calls = False
                     continue
                 final_content = clean
@@ -2565,7 +2607,7 @@ class AgentLoop:
         # ``backend.feedback`` run from ``_process_message``. We surface
         # ``outcome.status`` so that pipeline can gate on completion later.
 
-        outcome = TurnOutcome(status=status)
+        outcome = TurnOutcome(status=status, gate_triggers=gate_triggers)
         if self._checkpoint is not None:
             # Per-turn snapshot: one commit covering all of this turn's edits,
             # for both normal and interrupted exits (matches Claude Code/Cursor
@@ -2917,6 +2959,10 @@ class AgentLoop:
             on_checkpoint=_mid_turn_checkpoint,
         )
         self._stash_recovery(key, outcome)
+        if not self.interactive:
+            # Batch runs capture stdout but disable loguru inside the ``raven``
+            # package, so the counters go to stdout directly or they are lost.
+            print(format_gate_counters(outcome.gate_triggers), flush=True)
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."

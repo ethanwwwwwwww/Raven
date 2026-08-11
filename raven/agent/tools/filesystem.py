@@ -188,7 +188,9 @@ class WriteFileTool(_FsTool):
             "ALWAYS prefer editing existing files in the codebase: before creating a new file, "
             "check whether an existing file (an entry point, a stub, a TODO) already owns that "
             "responsibility, and NEVER write new files unless the task requires it. "
-            "If the target file already exists, read it with read_file before overwriting."
+            "If the target file already exists, read it with read_file before overwriting. "
+            "After replacing a symbol that is used elsewhere, check its other call "
+            "sites, overrides, and sibling branches for the same required change."
         )
 
     @property
@@ -289,7 +291,9 @@ class EditFileTool(_FsTool):
             "'N| ' line-number prefix that read_file output adds. "
             "Supports minor whitespace/line-ending differences. "
             "If old_text matches several places, either set replace_all=true to "
-            "change every one, or occurrence=<n> to change only the nth."
+            "change every one, or occurrence=<n> to change only the nth. "
+            "After changing a symbol that is used elsewhere, check its other call "
+            "sites, overrides, and sibling branches for the same required change."
         )
 
     @property
