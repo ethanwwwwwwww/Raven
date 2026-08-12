@@ -386,9 +386,8 @@ def register(app: typer.Typer) -> None:
         # nudges resolve to the terminal instead of being dropped.
         from types import SimpleNamespace
 
-        cli_shim = SimpleNamespace(enabled_channels=["cli"])
         if sentinel_runner is not None:
-            sentinel_runner.set_channel_manager(cli_shim)
+            sentinel_runner.set_channel_manager(SimpleNamespace(enabled_channels=["cli"]))
 
         # Show spinner when logs are off (no output to miss); skip when logs are on
         def _thinking_ctx():

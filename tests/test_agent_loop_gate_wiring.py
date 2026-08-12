@@ -18,6 +18,19 @@ import pytest
 
 from raven.agent.loop import AgentLoop
 from raven.providers.base import LLMProvider, LLMResponse
+from raven.spine.message import ChatType, Source
+from raven.spine.turn import Origin, TurnRequest
+
+# Every guardrail switch the loop reads. Clearing a partial list would let a
+# developer or CI shell that exports one of them turn a "default behavior"
+# test into something else entirely.
+ALL_GATE_SWITCHES = (
+    "RAVEN_REQUIRE_REAL_TEST_EVIDENCE",
+    "RAVEN_VERIFY_BEFORE_COMPLETE",
+    "RAVEN_GATE_STALE",
+    "RAVEN_GATE_RED",
+    "RAVEN_GATE_EMPTY_DIFF",
+)
 
 
 @pytest.fixture
@@ -63,10 +76,28 @@ def _agent(workspace: Path, provider: LLMProvider) -> AgentLoop:
     )
 
 
+def _clear_gate_env(monkeypatch) -> None:
+    """Unset every switch so the run exercises the built-in defaults."""
+    for switch in ALL_GATE_SWITCHES:
+        monkeypatch.delenv(switch, raising=False)
+
+
+def _set_all_gates(monkeypatch, value: str) -> None:
+    for switch in ALL_GATE_SWITCHES:
+        monkeypatch.setenv(switch, value)
+
+
 def _only_empty_diff_gate(monkeypatch) -> None:
-    for switch in ("RAVEN_REQUIRE_REAL_TEST_EVIDENCE", "RAVEN_VERIFY_BEFORE_COMPLETE"):
-        monkeypatch.setenv(switch, "off")
+    _set_all_gates(monkeypatch, "off")
     monkeypatch.setenv("RAVEN_GATE_EMPTY_DIFF", "1")
+
+
+def _user_turn(text: str) -> TurnRequest:
+    return TurnRequest(
+        origin=Origin.USER,
+        source=Source(channel="test", chat_id="c1", sender_id="user", chat_type=ChatType.DM),
+        text=text,
+    )
 
 
 @pytest.mark.asyncio
@@ -144,12 +175,7 @@ def _init_repo(path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_gate_is_silent_when_switched_off(workspace, monkeypatch):
-    for switch in (
-        "RAVEN_REQUIRE_REAL_TEST_EVIDENCE",
-        "RAVEN_VERIFY_BEFORE_COMPLETE",
-        "RAVEN_GATE_EMPTY_DIFF",
-    ):
-        monkeypatch.setenv(switch, "off")
+    _set_all_gates(monkeypatch, "off")
     provider = _TextOnlyProvider()
     agent = _agent(workspace, provider)
 
@@ -160,14 +186,13 @@ async def test_gate_is_silent_when_switched_off(workspace, monkeypatch):
     assert provider.calls == 1
 
 
+@pytest.mark.parametrize("interactive", [True, False])
 @pytest.mark.asyncio
-async def test_interactive_sessions_do_not_arm_the_gate_by_default(workspace, monkeypatch):
-    for switch in (
-        "RAVEN_REQUIRE_REAL_TEST_EVIDENCE",
-        "RAVEN_VERIFY_BEFORE_COMPLETE",
-        "RAVEN_GATE_EMPTY_DIFF",
-    ):
-        monkeypatch.delenv(switch, raising=False)
+async def test_no_gate_arms_itself_by_default(workspace, monkeypatch, interactive):
+    """Swarm-integration default: gates are opt-in in both run shapes. A
+    one-shot worker also serves non-coding requests (explain code, follow-up
+    Q&A turns) where change-the-code gates only mis-fire."""
+    _clear_gate_env(monkeypatch)
     provider = _TextOnlyProvider()
     agent = AgentLoop(
         provider=provider,
@@ -175,28 +200,8 @@ async def test_interactive_sessions_do_not_arm_the_gate_by_default(workspace, mo
         model="stub",
         max_iterations=10,
         restrict_to_workspace=True,
-        interactive=True,
+        interactive=interactive,
     )
-
-    _f, _t, messages, outcome = await agent._run_agent_loop([{"role": "user", "content": "what does this do?"}])
-
-    assert outcome.gate_triggers == {}
-    assert provider.calls == 1
-
-
-@pytest.mark.asyncio
-async def test_one_shot_runs_do_not_arm_gates_by_default(workspace, monkeypatch):
-    """Swarm-integration default: gates are opt-in even for one-shot task runs,
-    because an orchestrated worker also serves non-coding requests (explain
-    code, follow-up Q&A turns) where change-the-code gates only mis-fire."""
-    for switch in (
-        "RAVEN_REQUIRE_REAL_TEST_EVIDENCE",
-        "RAVEN_VERIFY_BEFORE_COMPLETE",
-        "RAVEN_GATE_EMPTY_DIFF",
-    ):
-        monkeypatch.delenv(switch, raising=False)
-    provider = _TextOnlyProvider()
-    agent = _agent(workspace, provider)
 
     _f, _t, messages, outcome = await agent._run_agent_loop([{"role": "user", "content": "explain this repo"}])
 
@@ -209,26 +214,11 @@ async def test_one_shot_runs_do_not_arm_gates_by_default(workspace, monkeypatch)
 async def test_stdout_stays_clean_when_no_gate_fires(workspace, monkeypatch, capsys):
     """An orchestrator consumes one-shot stdout as the reply; quiet turns must
     not append a gate_triggers trailer line."""
-    from raven.spine.message import ChatType, Source
-    from raven.spine.turn import Origin, TurnRequest
-
-    for switch in (
-        "RAVEN_REQUIRE_REAL_TEST_EVIDENCE",
-        "RAVEN_VERIFY_BEFORE_COMPLETE",
-        "RAVEN_GATE_EMPTY_DIFF",
-    ):
-        monkeypatch.delenv(switch, raising=False)
+    _clear_gate_env(monkeypatch)
     provider = _TextOnlyProvider()
     agent = _agent(workspace, provider)
 
-    out = await agent._process_message(
-        TurnRequest(
-            origin=Origin.USER,
-            source=Source(channel="test", chat_id="c1", sender_id="user", chat_type=ChatType.DM),
-            text="explain this repo",
-        ),
-        session_key="s1",
-    )
+    out = await agent._process_message(_user_turn("explain this repo"), session_key="s1")
 
     assert out is not None
     assert "gate_triggers" not in capsys.readouterr().out
@@ -236,20 +226,12 @@ async def test_stdout_stays_clean_when_no_gate_fires(workspace, monkeypatch, cap
 
 @pytest.mark.asyncio
 async def test_stdout_reports_counters_when_a_gate_fires(workspace, monkeypatch, capsys):
-    from raven.spine.message import ChatType, Source
-    from raven.spine.turn import Origin, TurnRequest
-
     _only_empty_diff_gate(monkeypatch)
     provider = _TextOnlyProvider()
     agent = _agent(workspace, provider)
 
     out = await agent._process_message(
-        TurnRequest(
-            origin=Origin.USER,
-            source=Source(channel="test", chat_id="c1", sender_id="user", chat_type=ChatType.DM),
-            text="Make sure the frobnicator handles empty input.",
-        ),
-        session_key="s1",
+        _user_turn("Make sure the frobnicator handles empty input."), session_key="s1"
     )
 
     assert out is not None

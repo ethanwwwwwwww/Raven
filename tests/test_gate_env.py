@@ -20,9 +20,11 @@ def test_unset_follows_the_call_site_default(monkeypatch):
     assert cg.gate_enabled(SWITCH, default=False) is False
 
 
-def test_the_call_site_must_state_its_default(monkeypatch):
-    # An implicit default would arm a newly added gate on every line shipping
-    # this helper, including the ones whose policy is opt-in.
+def test_the_default_is_mandatory_so_a_new_gate_cannot_silently_arm(monkeypatch):
+    """Omitting the default used to yield True, which on this line is the
+    opposite of the policy: a gate added later as ``gate_enabled(NEW_ENV)``
+    would arm itself in an orchestrated worker -- exactly the mis-firing this
+    branch exists to prevent. The call site must state its policy."""
     monkeypatch.delenv(SWITCH, raising=False)
     with pytest.raises(TypeError):
         cg.gate_enabled(SWITCH)

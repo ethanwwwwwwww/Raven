@@ -77,7 +77,9 @@ def gate_round_budget() -> int:
 def gate_enabled(env_name: str, default: bool) -> bool:
     """Resolve a guardrail switch: explicit environment value, else ``default``.
 
-    The call site owns the default. On the swarm-integration line every gate
+    The call site owns the default, and stating it is mandatory: an implicit
+    default let a newly added gate arm itself against the branch policy.
+    On the swarm-integration line every gate
     is opt-in (the loop passes ``default=False``): an orchestrated worker also
     serves non-coding requests, where change-the-code gates only mis-fire.
     Coding-style runs arm gates explicitly through the environment. An
