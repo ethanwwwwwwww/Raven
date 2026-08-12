@@ -9,7 +9,7 @@
   <a href="https://github.com/EverMind-AI/EverOS/discussions/67"><img src="https://img.shields.io/badge/WeCom-EverMind_社区-07C160?labelColor=gray&style=for-the-badge&logo=wechat&logoColor=white" alt="WeChat"></a>
 </p>
 
-[Website](https://raven.evermind.ai) · [中文](README.zh-CN.md)
+[Website](https://raven.evermind.ai) · [中文](README.zh-CN.md) · [蜂群集成说明 (this branch)](README.SWARM.md)
 
 </div>
 
