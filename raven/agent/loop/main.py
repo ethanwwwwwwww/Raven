@@ -1806,7 +1806,7 @@ class AgentLoop:
             return messages, changed
         protect_end = next((i + 1 for i, m in enumerate(messages) if m.get("role") == "user"), 1)
         transcript = compaction.render_transcript(messages[protect_end:split])
-        summary_model = cfg.model or model or self.model
+        summary_model = model or self.model
         try:
             response = await self.provider.chat(
                 messages=[

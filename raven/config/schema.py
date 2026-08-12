@@ -266,9 +266,10 @@ class CompactionConfig(Base):
     # None derives 25% of the usable window clamped to [2000, 8000] — the
     # verbatim tail preserved through a summary compaction.
     preserve_recent_tokens: int | None = None
-    # None summarizes with the session model itself; set to route summary
-    # calls to a cheaper model.
-    model: str | None = None
+    # Summaries always run on the session model. A dedicated summary-model
+    # field existed once and is deliberately gone: a pinned name outlives a
+    # model switch and then routes every summary to a retired endpoint. A
+    # legacy ``model`` key in saved configs is accepted and ignored.
 
 
 class AgentDefaults(Base):

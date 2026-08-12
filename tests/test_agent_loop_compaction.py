@@ -152,7 +152,8 @@ def test_compaction_config_defaults():
     cfg = CompactionConfig()
     assert cfg.auto is True and cfg.prune is True
     assert cfg.reserved_tokens is None and cfg.preserve_recent_tokens is None
-    assert cfg.model is None
+    # The retired summary-model field must stay a silently-ignored legacy key.
+    assert not hasattr(CompactionConfig.model_validate({"model": "legacy"}), "model")
 
 
 # --------------------------------------------------------------------------- #
@@ -168,6 +169,7 @@ class _CompactionProvider(LLMProvider):
         super().__init__(api_key="test")
         self._window = window
         self.summary_calls: list[list[dict]] = []
+        self.summary_models: list[str | None] = []
         self.seen_messages: list[list[dict]] = []
 
     async def chat(
@@ -182,6 +184,7 @@ class _CompactionProvider(LLMProvider):
     ):
         if not tools and any("compacting an agent" in str(m.get("content", "")) for m in messages):
             self.summary_calls.append([dict(m) for m in messages])
+            self.summary_models.append(model)
             return LLMResponse(content="COMPACT-SUMMARY: goal, facts, progress", finish_reason="stop")
         self.seen_messages.append([dict(m) for m in messages])
         if any(SUMMARY_MARKER in str(m.get("content", "")) for m in messages):
@@ -221,6 +224,32 @@ async def test_proactive_compaction_triggers_before_overflow(workspace):
     assert len(provider.summary_calls) >= 1
     compacted_call = provider.seen_messages[-1]
     assert any(SUMMARY_MARKER in str(m.get("content", "")) for m in compacted_call)
+
+
+@pytest.mark.asyncio
+async def test_summary_always_uses_the_session_model(workspace):
+    """A legacy config pinning a summary model must not route summaries away
+    from the session model: after a model switch the pinned name points at a
+    retired endpoint and every compaction would fail."""
+    provider = _CompactionProvider()
+    agent = AgentLoop(
+        provider=provider,
+        workspace=workspace,
+        model="stub",
+        max_iterations=12,
+        restrict_to_workspace=True,
+        compaction=CompactionConfig.model_validate({"model": "retired-model"}),
+    )
+    out = await agent._process_message(
+        TurnRequest(
+            origin=Origin.USER,
+            source=Source(channel="test", chat_id="c1", sender_id="user", chat_type=ChatType.DM),
+            text="go",
+        ),
+        session_key="s1",
+    )
+    assert out is not None
+    assert provider.summary_models and all(m == "stub" for m in provider.summary_models)
 
 
 class _HardOverflowNoToolsProvider(LLMProvider):
