@@ -156,6 +156,22 @@ def _invoke_agent_capturing_session(
     return r, captured
 
 
+def test_agent_one_shot_wires_no_cron_service(
+    tmp_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The coding agent schedules nothing: the agent path must not build a
+    CronService, and the eager get_cron_dir() call must stop leaving an empty
+    cron/ directory next to every config file (reminders belong to the
+    gateway/TUI, which wire their own service)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    r, _ = _invoke_agent_capturing_session(monkeypatch, workspace, [])
+    assert r.exit_code == 0
+    from raven.config.paths import get_data_dir
+
+    assert not (get_data_dir() / "cron").exists()
+
+
 def test_agent_default_mints_fresh_session(tmp_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Bare ``agent -m`` mints a fresh ``cli:{chat_id}`` per invocation."""
     import re
@@ -290,53 +306,28 @@ def test_agent_continue_without_prior_session_starts_fresh(
 # ============================================================================
 
 
-def test_agent_fake_now_threads_now_fn_into_cron(
+def test_agent_never_constructs_a_cron_service(
     tmp_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``agent --fake-now`` must thread now_fn into CronService so the
-    past-schedule guard reads the simulated clock, not wall-time. Without it,
-    an ``at`` reminder set under a back-dated --fake-now is rejected as "in the
-    past" — the agent then leaks the real date and longrun trajectories rot.
-    """
+    """The agent path must not construct a CronService at all (with or without
+    --fake-now): reminders belong to the gateway/TUI. Guards against the wiring
+    creeping back and re-growing the empty cron/ dir next to every config."""
     import raven.proactive_engine.schedulers.cron.service as cron_mod
 
     ws = tmp_path / "ws"
     ws.mkdir()
-    captured: dict[str, object] = {}
+    constructed: list[object] = []
     orig_init = cron_mod.CronService.__init__
 
-    def _spy_init(self, *args, now_fn=None, **kwargs) -> None:
-        captured["now_fn"] = now_fn
-        orig_init(self, *args, now_fn=now_fn, **kwargs)
+    def _spy_init(self, *args, **kwargs) -> None:
+        constructed.append(self)
+        orig_init(self, *args, **kwargs)
 
     monkeypatch.setattr(cron_mod.CronService, "__init__", _spy_init)
     _invoke_agent_capturing_session(monkeypatch, ws, ["--fake-now", "2026-05-01T08:00:00"])
-
-    now_fn = captured.get("now_fn")
-    assert now_fn is not None, "agent --fake-now did not thread now_fn into CronService"
-    assert now_fn().strftime("%Y-%m-%d") == "2026-05-01"
-
-
-def test_agent_without_fake_now_leaves_cron_on_wall_clock(
-    tmp_config: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No --fake-now → now_fn resolves to None so CronService keeps its
-    real-clock default (production must be unaffected by the fake-clock wiring)."""
-    import raven.proactive_engine.schedulers.cron.service as cron_mod
-
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    captured: dict[str, object] = {"now_fn": "unset"}
-    orig_init = cron_mod.CronService.__init__
-
-    def _spy_init(self, *args, now_fn=None, **kwargs) -> None:
-        captured["now_fn"] = now_fn
-        orig_init(self, *args, now_fn=now_fn, **kwargs)
-
-    monkeypatch.setattr(cron_mod.CronService, "__init__", _spy_init)
     _invoke_agent_capturing_session(monkeypatch, ws, [])
 
-    assert captured["now_fn"] is None
+    assert not constructed
 
 
 # ============================================================================
