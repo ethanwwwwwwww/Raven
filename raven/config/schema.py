@@ -669,10 +669,11 @@ class WebSearchConfig(Base):
 class WebToolsConfig(Base):
     """Web tools configuration."""
 
-    # Off by default: a coding agent works inside a checkout, and in an offline
-    # sandbox every web call fails, which only teaches the model a dead path.
-    # Set true to get web_search (still needs a Serper key) and web_fetch back.
-    enabled: bool = False
+    # On by default on the swarm-integration line: an orchestrated worker
+    # handles research requests as well as coding, so web_fetch (keyless) and
+    # web_search (still needs its key) are part of the default surface.
+    # Offline sandboxes and evaluation configs must pin this to false.
+    enabled: bool = True
     proxy: str | None = None  # HTTP/SOCKS5 proxy URL, e.g. "http://127.0.0.1:7890" or "socks5://127.0.0.1:1080"
     jina_api_key: str = ""  # Jina Reader API key
     search: WebSearchConfig = Field(default_factory=WebSearchConfig)

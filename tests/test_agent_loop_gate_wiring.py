@@ -66,7 +66,7 @@ def _agent(workspace: Path, provider: LLMProvider) -> AgentLoop:
 def _only_empty_diff_gate(monkeypatch) -> None:
     for switch in ("RAVEN_REQUIRE_REAL_TEST_EVIDENCE", "RAVEN_VERIFY_BEFORE_COMPLETE"):
         monkeypatch.setenv(switch, "off")
-    monkeypatch.delenv("RAVEN_GATE_EMPTY_DIFF", raising=False)
+    monkeypatch.setenv("RAVEN_GATE_EMPTY_DIFF", "1")
 
 
 @pytest.mark.asyncio
@@ -182,3 +182,75 @@ async def test_interactive_sessions_do_not_arm_the_gate_by_default(workspace, mo
 
     assert outcome.gate_triggers == {}
     assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_one_shot_runs_do_not_arm_gates_by_default(workspace, monkeypatch):
+    """Swarm-integration default: gates are opt-in even for one-shot task runs,
+    because an orchestrated worker also serves non-coding requests (explain
+    code, follow-up Q&A turns) where change-the-code gates only mis-fire."""
+    for switch in (
+        "RAVEN_REQUIRE_REAL_TEST_EVIDENCE",
+        "RAVEN_VERIFY_BEFORE_COMPLETE",
+        "RAVEN_GATE_EMPTY_DIFF",
+    ):
+        monkeypatch.delenv(switch, raising=False)
+    provider = _TextOnlyProvider()
+    agent = _agent(workspace, provider)
+
+    _f, _t, messages, outcome = await agent._run_agent_loop([{"role": "user", "content": "explain this repo"}])
+
+    assert not any("without any observed repository modification" in str(m.get("content")) for m in messages)
+    assert outcome.gate_triggers == {}
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stdout_stays_clean_when_no_gate_fires(workspace, monkeypatch, capsys):
+    """An orchestrator consumes one-shot stdout as the reply; quiet turns must
+    not append a gate_triggers trailer line."""
+    from raven.spine.message import ChatType, Source
+    from raven.spine.turn import Origin, TurnRequest
+
+    for switch in (
+        "RAVEN_REQUIRE_REAL_TEST_EVIDENCE",
+        "RAVEN_VERIFY_BEFORE_COMPLETE",
+        "RAVEN_GATE_EMPTY_DIFF",
+    ):
+        monkeypatch.delenv(switch, raising=False)
+    provider = _TextOnlyProvider()
+    agent = _agent(workspace, provider)
+
+    out = await agent._process_message(
+        TurnRequest(
+            origin=Origin.USER,
+            source=Source(channel="test", chat_id="c1", sender_id="user", chat_type=ChatType.DM),
+            text="explain this repo",
+        ),
+        session_key="s1",
+    )
+
+    assert out is not None
+    assert "gate_triggers" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_stdout_reports_counters_when_a_gate_fires(workspace, monkeypatch, capsys):
+    from raven.spine.message import ChatType, Source
+    from raven.spine.turn import Origin, TurnRequest
+
+    _only_empty_diff_gate(monkeypatch)
+    provider = _TextOnlyProvider()
+    agent = _agent(workspace, provider)
+
+    out = await agent._process_message(
+        TurnRequest(
+            origin=Origin.USER,
+            source=Source(channel="test", chat_id="c1", sender_id="user", chat_type=ChatType.DM),
+            text="Make sure the frobnicator handles empty input.",
+        ),
+        session_key="s1",
+    )
+
+    assert out is not None
+    assert "gate_triggers: empty_diff=1" in capsys.readouterr().out

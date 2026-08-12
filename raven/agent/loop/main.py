@@ -2143,9 +2143,11 @@ class AgentLoop:
             wrapup_sec=self.profile.deadline_wrapup_sec,
             hard_stop_sec=self.profile.deadline_hard_stop_sec,
         )
-        # Guardrail defaults come from the run profile (one-shot task runs get
-        # them on, attended sessions off — see raven.agent.profile). Env vars
-        # override either way, per gate.
+        # Guardrail defaults come from the run profile. On the
+        # swarm-integration line every preset an implicit invocation can
+        # reach ships gates off (see raven.agent.profile): an orchestrated
+        # worker also serves non-coding requests, where change-the-code
+        # gates only mis-fire. Env vars override either way, per gate.
         gate_defaults = self.profile.gates
         test_gate_enabled = completion_gates.gate_enabled(
             "RAVEN_REQUIRE_REAL_TEST_EVIDENCE", gate_defaults.test_evidence
@@ -2181,7 +2183,7 @@ class AgentLoop:
         red_nudged = False
         # Empty-diff falsification gate (2026-08, trajectory error analysis across two
         # model rounds). Same conventions as the four gates above: turn-local, one-shot,
-        # facts only, on unless opted out.
+        # facts only, default from the profile.
         empty_diff_gate_enabled = completion_gates.gate_enabled(
             completion_gates.EMPTY_DIFF_ENV, gate_defaults.empty_diff
         )
@@ -3244,10 +3246,13 @@ class AgentLoop:
             on_checkpoint=_mid_turn_checkpoint,
         )
         self._stash_recovery(key, outcome)
-        if not self.profile.attended or self.profile.name == "legacy_oneshot":
+        if (not self.profile.attended or self.profile.name == "legacy_oneshot") and any(
+            outcome.gate_triggers.values()
+        ):
             # Batch runs capture stdout but disable loguru inside the ``raven``
-            # package, so the counters go to stdout directly or they are lost.
-            # legacy_oneshot keeps printing because pre-profile `-m` runs did.
+            # package, so fired-gate counters go to stdout directly or they are
+            # lost. Quiet turns print nothing: an orchestrator consuming stdout
+            # as the reply must not have to strip a trailer line.
             print(format_gate_counters(outcome.gate_triggers), flush=True)
 
         if final_content is None:

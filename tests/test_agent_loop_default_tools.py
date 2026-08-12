@@ -57,8 +57,10 @@ def test_web_search_still_needs_its_key_when_enabled(tmp_path: Path) -> None:
     assert loop.tools.has("web_fetch"), "web_fetch is keyless and rides the group switch alone"
 
 
-def test_web_config_defaults_to_disabled() -> None:
-    assert WebToolsConfig().enabled is False
+def test_web_config_defaults_to_enabled() -> None:
+    # Swarm-integration line: an orchestrated worker researches as well as
+    # codes, so the config default is on; offline/evaluation configs pin false.
+    assert WebToolsConfig().enabled is True
 
 
 def test_cron_is_not_registered_even_with_a_service(tmp_path: Path) -> None:

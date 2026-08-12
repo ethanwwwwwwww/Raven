@@ -77,12 +77,11 @@ def gate_round_budget() -> int:
 def gate_enabled(env_name: str, default: bool) -> bool:
     """Resolve a guardrail switch: explicit environment value, else ``default``.
 
-    Opt-in switches produced a silent-no-op failure once already: a full run
-    believed the gates were active while nothing had set them, and the round's
-    conclusion was void. The gates therefore default to on for one-shot task
-    runs (the caller passes ``default=True``) and off for interactive sessions,
-    where finishing a turn usually means answering rather than changing code.
-    An explicit value overrides in either direction: "0", "false", "no", "off"
+    The call site owns the default. On the swarm-integration line every gate
+    is opt-in (the loop passes ``default=False``): an orchestrated worker also
+    serves non-coding requests, where change-the-code gates only mis-fire.
+    Coding-style runs arm gates explicitly through the environment. An
+    explicit value overrides in either direction: "0", "false", "no", "off"
     or "disabled" turns a gate off, anything else turns it on.
 
     Stating the default is mandatory: a gate added later as

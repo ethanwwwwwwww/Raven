@@ -1,13 +1,10 @@
-"""Guardrail switch semantics: on by default for one-shot task runs.
+"""Guardrail switch semantics: the call site owns the default, env overrides.
 
-The gates used to be opt-in, which produced a silent-no-op failure: a full
-evaluation ran believing the guardrails were active while the environment never
-set them, and the whole round's conclusion had to be discarded. They are now on
-by default wherever the loop runs a one-shot task (``raven agent --message ...``,
-which is what an evaluation harness drives), and off by default in interactive
-sessions, where a completion is usually an answer rather than a code change.
-An explicit environment value overrides the default in either direction, which
-is how an ablation arm turns a single gate off.
+On the swarm-integration line every gate is opt-in (the loop passes
+``default=False``): an orchestrated worker also serves non-coding requests
+(explain code, follow-up Q&A turns), where change-the-code gates only
+mis-fire. Coding-style runs arm gates explicitly through the environment.
+An explicit environment value overrides the default in either direction.
 """
 
 import pytest
