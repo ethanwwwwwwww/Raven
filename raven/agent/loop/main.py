@@ -1735,8 +1735,15 @@ class AgentLoop:
     _COMPACT_SUMMARY_MAX_FAILURES = 3
 
     def _compaction_limits(self, model: str | None) -> tuple[int, int]:
-        """(window, reserved) for the compaction trigger and tail budget."""
-        limit = resolve_context_window(model) or self.context_window_tokens
+        """(window, reserved) for the compaction trigger and tail budget.
+
+        Cap at the configured window: when the provider table reports a larger
+        theoretical window than we operate in (e.g. deepseek-v4-flash advertises
+        1M but the run is configured for 262k), the trigger must key off the
+        window we actually run within, or it never fires before the real overflow.
+        """
+        resolved = resolve_context_window(model)
+        limit = min(resolved, self.context_window_tokens) if resolved else self.context_window_tokens
         provider_budget = getattr(getattr(self.provider, "generation", None), "max_tokens", None)
         reserved = compaction.reserved_tokens(self._compaction.reserved_tokens, provider_budget)
         return limit, reserved
@@ -2060,7 +2067,7 @@ class AgentLoop:
             if self._compaction.auto and last_context_used:
                 fullness = self._context_fullness(messages, last_context_used, last_usage_msg_count)
                 limit, reserved = self._compaction_limits(effective_model)
-                if compaction.should_compact(fullness, limit, reserved):
+                if compaction.should_compact(fullness, limit, reserved, self._compaction.trigger_ratio):
                     messages, changed = await self._compact_context(messages, effective_model, observed_used=fullness)
                     if changed:
                         compacted_this_turn = True

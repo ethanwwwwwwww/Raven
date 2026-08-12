@@ -306,9 +306,19 @@ class LiteLLMProvider(LLMProvider):
 
     @staticmethod
     def _sanitize_messages(
-        messages: list[dict[str, Any]], extra_keys: frozenset[str] = frozenset()
+        messages: list[dict[str, Any]],
+        extra_keys: frozenset[str] = frozenset(),
+        coerce_reasoning: bool = False,
     ) -> list[dict[str, Any]]:
-        """Strip non-standard keys and ensure assistant messages have a content key."""
+        """Strip non-standard keys and ensure assistant messages have a content key.
+
+        DeepSeek-V4 thinking mode rejects a request whose replayed assistant
+        message carries reasoning_content: null (or omits it) with 400
+        "reasoning_content ... must be passed back"; an empty string is accepted.
+        When coerce_reasoning is set, every assistant message is given a
+        present string reasoning_content so the round-trip never 400s on the
+        turns where the model produced no visible reasoning.
+        """
         allowed = _ALLOWED_MSG_KEYS | extra_keys
         sanitized = LLMProvider._sanitize_request_messages(messages, allowed)
         id_map: dict[str, str] = {}
@@ -334,6 +344,10 @@ class LiteLLMProvider(LLMProvider):
 
             if "tool_call_id" in clean and clean["tool_call_id"]:
                 clean["tool_call_id"] = map_id(clean["tool_call_id"])
+
+            if coerce_reasoning and clean.get("role") == "assistant":
+                if not isinstance(clean.get("reasoning_content"), str):
+                    clean["reasoning_content"] = ""
         return sanitized
 
     def _mirror_reasoning_for_gateway(self, kwargs: dict[str, Any], reasoning_effort: str) -> None:
@@ -388,7 +402,11 @@ class LiteLLMProvider(LLMProvider):
 
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": self._sanitize_messages(self._sanitize_empty_content(messages), extra_keys=extra_msg_keys),
+            "messages": self._sanitize_messages(
+                self._sanitize_empty_content(messages),
+                extra_keys=extra_msg_keys,
+                coerce_reasoning="deepseek-v4" in (original_model or "").lower(),
+            ),
             "max_tokens": max_tokens,
             "temperature": temperature,
             # Per-read httpx cap forwarded to the underlying client. This alone
@@ -503,7 +521,11 @@ class LiteLLMProvider(LLMProvider):
 
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": self._sanitize_messages(self._sanitize_empty_content(messages), extra_keys=extra_msg_keys),
+            "messages": self._sanitize_messages(
+                self._sanitize_empty_content(messages),
+                extra_keys=extra_msg_keys,
+                coerce_reasoning="deepseek-v4" in (original_model or "").lower(),
+            ),
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": True,

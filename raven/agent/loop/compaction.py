@@ -91,11 +91,21 @@ def projected_context_used(
     return last_reported + estimate(messages[counted_upto:])
 
 
-def should_compact(context_used: int, limit: int, reserved: int) -> bool:
-    """True when the last observed context size crosses the trigger line."""
+def should_compact(
+    context_used: int, limit: int, reserved: int, trigger_ratio: float | None = None
+) -> bool:
+    """True when the last observed context size crosses the trigger line.
+
+    The base trigger is ``limit - reserved`` (just below overflow). A
+    ``trigger_ratio`` in (0, 1) lowers the line to ``trigger_ratio * limit`` when
+    that is smaller, so compaction fires proactively instead of at the brink.
+    """
     if limit <= 0:
         return False
-    return context_used >= max(0, limit - reserved)
+    threshold = max(0, limit - reserved)
+    if trigger_ratio is not None and 0 < trigger_ratio < 1:
+        threshold = min(threshold, int(trigger_ratio * limit))
+    return context_used >= threshold
 
 
 def prune_old_tool_results(messages: list[dict], keep_recent: int) -> tuple[list[dict], int]:
