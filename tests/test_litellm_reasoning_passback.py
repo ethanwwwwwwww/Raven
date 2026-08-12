@@ -1,20 +1,25 @@
-"""DeepSeek 官方端点 thinking 模式的 reasoning_content 回传契约。
+"""reasoning_content passback contract for DeepSeek's official thinking mode.
 
-真机事故(2026-08-11, WorkBuddy code 全量, deepseek-v4-flash 官方端点):
-模型偶尔在连续操作的快轮次返回**不带 reasoning_content 的 tool_call 响应**;
-这条助手消息进历史后,下一个请求被服务端 400 拒绝:
+Live incident (2026-08-11, WorkBuddy code full run, deepseek-v4-flash on the
+official endpoint): the model occasionally returns a tool_call response
+WITHOUT reasoning_content on fast consecutive turns; once that assistant
+message enters the history, the next request is rejected with 400:
     "The `reasoning_content` in the thinking mode must be passed back to the API."
-240 个 attempt 里 218 个(91%)被它提前掐断。
+218 of 240 attempts (91%) were cut short by it.
 
-对官方 API 的契约探针(2026-08-11 实测):
-    assistant 消息带非空 reasoning_content     -> 200
-    assistant 消息带 reasoning_content=""      -> 200
-    assistant 消息缺 reasoning_content 键      -> 400
+Contract probe against the official API (2026-08-11):
+    assistant message with non-empty reasoning_content -> 200
+    assistant message with reasoning_content=""        -> 200
+    assistant message missing the reasoning_content key -> 400
 
-修法:请求清洗时,凡本次消息列表里已有任何助手消息携带 reasoning_content
-(即对话明显处于 thinking 模式),就给缺键的助手消息补 reasoning_content=""。
-非 thinking 对话(整个列表都没有这个键)保持原样,不新增字段。
-这同时覆盖 prune_old_reasoning(紧急收缩)剥掉老推理后的请求。
+Fix: one backfill action with two arming conditions. Behavioral: once any
+assistant message in the list carries reasoning_content (the conversation is
+visibly in thinking mode), assistant messages missing the key get "".
+Pinned: coerce_reasoning=True (model-name match at the call site) backfills
+unconditionally, covering histories where no reasoning survived pruning or
+replay. Non-thinking conversations without the pin gain no new keys. This
+also covers requests after prune_old_reasoning (emergency shrink) stripped
+older reasoning.
 """
 
 from __future__ import annotations
@@ -45,11 +50,11 @@ def test_assistant_missing_reasoning_is_backfilled_with_empty_string() -> None:
     ]
     out = _sanitize(messages)
     assert out[1]["reasoning_content"] == "let me look around"
-    assert out[3]["reasoning_content"] == "", "thinking 对话里缺键的助手消息必须补空串,否则官方端点 400"
+    assert out[3]["reasoning_content"] == "", "keyless assistant msgs in thinking replays must get '' or the official endpoint 400s"
 
 
 def test_pruned_reasoning_history_is_backfilled() -> None:
-    """紧急收缩会 pop 掉老助手消息的 reasoning_content,回传时同样要补键。"""
+    """Emergency shrink pops reasoning_content off old assistant messages; replay must re-add the key."""
     messages = [
         {"role": "user", "content": "task"},
         {"role": "assistant", "content": "old turn, reasoning pruned", "tool_calls": []},
@@ -61,7 +66,7 @@ def test_pruned_reasoning_history_is_backfilled() -> None:
 
 
 def test_non_thinking_conversations_gain_no_new_keys() -> None:
-    """整个列表没有任何 reasoning_content 时保持原样——别给非 thinking 端点塞新字段。"""
+    """A list with no reasoning_content anywhere stays untouched: no new fields for non-thinking endpoints."""
     messages = [
         {"role": "user", "content": "hi"},
         {"role": "assistant", "content": "hello"},
@@ -73,10 +78,31 @@ def test_non_thinking_conversations_gain_no_new_keys() -> None:
 
 
 def test_reasoning_none_counts_as_missing_and_is_backfilled() -> None:
-    """键在但值是 None 等价于缺键(服务端按缺失处理),同样补成空串。"""
+    """A present key holding None counts as missing on the server side; it gets the same empty-string backfill."""
     messages = [
         {"role": "assistant", "content": "", "reasoning_content": "thought"},
         {"role": "assistant", "content": "", "reasoning_content": None},
     ]
     out = _sanitize(messages)
     assert out[1]["reasoning_content"] == ""
+
+
+def test_coerce_reasoning_backfills_even_without_prior_reasoning() -> None:
+    """A pinned endpoint (coerce_reasoning=True) backfills even when no reasoning survives anywhere
+    in the history - the pruned/replayed states that the behavioral arming condition cannot see."""
+    messages = [
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "", "tool_calls": []},
+    ]
+    out = LiteLLMProvider._sanitize_messages(messages, coerce_reasoning=True)
+    assert out[1]["reasoning_content"] == ""
+
+
+def test_no_coercion_and_no_prior_reasoning_stays_untouched() -> None:
+    """With neither arming condition met, not a single new key is added."""
+    messages = [
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": "", "tool_calls": []},
+    ]
+    out = LiteLLMProvider._sanitize_messages(messages, coerce_reasoning=False)
+    assert "reasoning_content" not in out[1]

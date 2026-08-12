@@ -345,31 +345,31 @@ class LiteLLMProvider(LLMProvider):
             if "tool_call_id" in clean and clean["tool_call_id"]:
                 clean["tool_call_id"] = map_id(clean["tool_call_id"])
 
-            if coerce_reasoning and clean.get("role") == "assistant":
-                if not isinstance(clean.get("reasoning_content"), str):
-                    clean["reasoning_content"] = ""
-        return LiteLLMProvider._backfill_reasoning_keys(sanitized)
+        return LiteLLMProvider._backfill_reasoning_keys(sanitized, force=coerce_reasoning)
 
     @staticmethod
-    def _backfill_reasoning_keys(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Give every assistant message a reasoning_content key once any of them has one.
+    def _backfill_reasoning_keys(messages: list[dict[str, Any]], force: bool = False) -> list[dict[str, Any]]:
+        """Ensure assistant messages carry a string reasoning_content when required.
 
         DeepSeek's official endpoint in thinking mode rejects a replayed
-        assistant message that lacks the reasoning_content key with 400
+        assistant message whose reasoning_content is absent or null with 400
         "must be passed back to the API", and the model itself emits
         tool-call turns without the field. Probe-verified: key present but
-        empty -> 200, key missing -> 400 - so only an empty string is
-        backfilled, never fabricated content. Scoped by behavior, not model
-        name: it fires only when the message list already carries
-        reasoning_content (the conversation is visibly in thinking mode),
-        leaving endpoints that never emit the field untouched. Complements
-        coerce_reasoning above, which pins the known deepseek-v4 case even
-        when every reasoning block has been pruned from the history.
+        empty -> 200, key missing -> 400 - so only an empty string is ever
+        backfilled, never fabricated content. One action, two arming
+        conditions: ``force`` pins endpoints known to enforce the contract
+        (matched by model name at the call site) even when no reasoning
+        survived pruning or replay; otherwise the backfill arms itself once
+        any assistant message already carries the field (the conversation is
+        visibly in thinking mode), so endpoints that never emit it gain no
+        new keys and unknown enforcing endpoints are still covered.
         """
-        if not any(m.get("role") == "assistant" and m.get("reasoning_content") is not None for m in messages):
+        if not force and not any(
+            m.get("role") == "assistant" and m.get("reasoning_content") is not None for m in messages
+        ):
             return messages
         for m in messages:
-            if m.get("role") == "assistant" and m.get("reasoning_content") is None:
+            if m.get("role") == "assistant" and not isinstance(m.get("reasoning_content"), str):
                 m["reasoning_content"] = ""
         return messages
 
