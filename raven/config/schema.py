@@ -257,6 +257,12 @@ class CompactionConfig(Base):
     prune: bool = True
     # None derives min(20000, provider max_tokens) — room kept for the reply.
     reserved_tokens: int | None = None
+    # None keeps the sole trigger at ``window - reserved_tokens`` (fires just
+    # below overflow). Set a fraction in (0, 1) to also compact once the context
+    # crosses ``trigger_ratio * window`` — earlier, proactive compaction that
+    # keeps long turns off the slow high-context tail. Default None preserves
+    # product behavior.
+    trigger_ratio: float | None = None
     # None derives 25% of the usable window clamped to [2000, 8000] — the
     # verbatim tail preserved through a summary compaction.
     preserve_recent_tokens: int | None = None

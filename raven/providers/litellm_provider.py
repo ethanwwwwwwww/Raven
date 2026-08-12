@@ -306,9 +306,19 @@ class LiteLLMProvider(LLMProvider):
 
     @staticmethod
     def _sanitize_messages(
-        messages: list[dict[str, Any]], extra_keys: frozenset[str] = frozenset()
+        messages: list[dict[str, Any]],
+        extra_keys: frozenset[str] = frozenset(),
+        coerce_reasoning: bool = False,
     ) -> list[dict[str, Any]]:
-        """Strip non-standard keys and ensure assistant messages have a content key."""
+        """Strip non-standard keys and ensure assistant messages have a content key.
+
+        DeepSeek-V4 thinking mode rejects a request whose replayed assistant
+        message carries reasoning_content: null (or omits it) with 400
+        "reasoning_content ... must be passed back"; an empty string is accepted.
+        When coerce_reasoning is set, every assistant message is given a
+        present string reasoning_content so the round-trip never 400s on the
+        turns where the model produced no visible reasoning.
+        """
         allowed = _ALLOWED_MSG_KEYS | extra_keys
         sanitized = LLMProvider._sanitize_request_messages(messages, allowed)
         id_map: dict[str, str] = {}
@@ -334,21 +344,27 @@ class LiteLLMProvider(LLMProvider):
 
             if "tool_call_id" in clean and clean["tool_call_id"]:
                 clean["tool_call_id"] = map_id(clean["tool_call_id"])
+
+            if coerce_reasoning and clean.get("role") == "assistant":
+                if not isinstance(clean.get("reasoning_content"), str):
+                    clean["reasoning_content"] = ""
         return LiteLLMProvider._backfill_reasoning_keys(sanitized)
 
     @staticmethod
     def _backfill_reasoning_keys(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Give every assistant message a reasoning_content key once any of them has one.
 
-        DeepSeek 官方端点的 thinking 模式要求历史里的助手消息**必须带** reasoning_content
-        键,缺键直接 400("must be passed back to the API")。而模型自己就会在连续操作的
-        快轮次返回不带该字段的 tool_call 响应——原样回传即触发 400(2026-08-11 WorkBuddy
-        全量真机:240 个 attempt 里 218 个被掐断)。契约探针实测:键在但值为空串 → 200,
-        缺键 → 400。所以只补空串,不伪造推理内容。
-
-        只在本次消息列表已经出现过 reasoning_content(对话明显处于 thinking 模式)时才补,
-        非 thinking 对话保持原样——不给从没见过这个字段的端点塞新键。这同时覆盖
-        prune_old_reasoning(紧急收缩)剥掉老推理后的请求。
+        DeepSeek's official endpoint in thinking mode rejects a replayed
+        assistant message that lacks the reasoning_content key with 400
+        "must be passed back to the API", and the model itself emits
+        tool-call turns without the field. Probe-verified: key present but
+        empty -> 200, key missing -> 400 - so only an empty string is
+        backfilled, never fabricated content. Scoped by behavior, not model
+        name: it fires only when the message list already carries
+        reasoning_content (the conversation is visibly in thinking mode),
+        leaving endpoints that never emit the field untouched. Complements
+        coerce_reasoning above, which pins the known deepseek-v4 case even
+        when every reasoning block has been pruned from the history.
         """
         if not any(m.get("role") == "assistant" and m.get("reasoning_content") is not None for m in messages):
             return messages
@@ -409,7 +425,11 @@ class LiteLLMProvider(LLMProvider):
 
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": self._sanitize_messages(self._sanitize_empty_content(messages), extra_keys=extra_msg_keys),
+            "messages": self._sanitize_messages(
+                self._sanitize_empty_content(messages),
+                extra_keys=extra_msg_keys,
+                coerce_reasoning="deepseek-v4" in (original_model or "").lower(),
+            ),
             "max_tokens": max_tokens,
             "temperature": temperature,
             # Per-read httpx cap forwarded to the underlying client. This alone
@@ -524,7 +544,11 @@ class LiteLLMProvider(LLMProvider):
 
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": self._sanitize_messages(self._sanitize_empty_content(messages), extra_keys=extra_msg_keys),
+            "messages": self._sanitize_messages(
+                self._sanitize_empty_content(messages),
+                extra_keys=extra_msg_keys,
+                coerce_reasoning="deepseek-v4" in (original_model or "").lower(),
+            ),
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": True,

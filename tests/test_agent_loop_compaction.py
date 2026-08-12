@@ -70,6 +70,18 @@ def test_should_compact_at_threshold():
     assert should_compact(1, 0, 20_000) is False  # unknown window: never
 
 
+def test_should_compact_trigger_ratio_lowers_line():
+    # Base line is 180k (window - reserved). A 0.6 ratio pulls it down to 120k.
+    assert should_compact(130_000, 200_000, 20_000) is False  # below base, no ratio
+    assert should_compact(130_000, 200_000, 20_000, 0.6) is True  # 130k >= 0.6*200k
+    assert should_compact(119_999, 200_000, 20_000, 0.6) is False
+    # Ratio never raises the line above the base trigger.
+    assert should_compact(185_000, 200_000, 20_000, 0.95) is True
+    # Out-of-range ratios are ignored (fall back to base trigger).
+    assert should_compact(130_000, 200_000, 20_000, 0.0) is False
+    assert should_compact(130_000, 200_000, 20_000, 1.0) is False
+
+
 # --------------------------------------------------------------------------- #
 # unit: prune tier                                                              #
 # --------------------------------------------------------------------------- #
