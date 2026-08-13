@@ -570,6 +570,10 @@ class AgentLoop:
             skill_forge_config=skill_forge_config,
             llm_provider=provider,
             now_fn=now_fn,
+            # Estimation must render the same per-family identity the live
+            # ContextAssembler sends, or the history budget overstates by the
+            # size difference between the family prompt and default.txt.
+            model=self.model,
             wrap_tool_outputs=wrap_tool_outputs,
         )
         self.sessions = session_manager or SessionManager(workspace)
