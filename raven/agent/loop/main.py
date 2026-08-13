@@ -2550,9 +2550,15 @@ class AgentLoop:
                     )
                     prev_had_tool_calls = False
                     continue
+                workspace_dirty = (
+                    await completion_gates.workspace_has_changes(self.workspace)
+                    if empty_diff_gate_enabled and not empty_diff_nudged
+                    else None
+                )
                 empty_nudge = completion_gates.empty_diff_nudge(
                     enabled=empty_diff_gate_enabled,
                     code_edits_observed=turn_code_edits,
+                    workspace_dirty=workspace_dirty,
                     already_nudged=empty_diff_nudged,
                     iteration=iteration,
                     max_iterations=self.max_iterations,
