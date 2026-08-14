@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import os
 import platform
 from datetime import datetime
 from pathlib import Path
@@ -131,6 +132,51 @@ Before declaring done
   actually need.
 """
 
+# Opt-in via RAVEN_SPEC_ACCEPTANCE. Appended after the discipline block for
+# tasks whose acceptance criterion is the statement rather than the tests the
+# project already has: adding behaviour nothing tests yet, against a written
+# spec. The block above ranks the project's existing tests first and gates the
+# spec-literal check behind "no existing project or tests", which is the wrong
+# way round here - a mature repo full of green tests says nothing about
+# behaviour it has never covered. Written as an explicit override rather than
+# by rewording the block, so the default text stays byte-for-byte identical.
+_SPEC_ACCEPTANCE = """
+## Acceptance for this task comes from the task statement
+This task asks for behavior the project does not test yet, so the statement -
+not the existing suite - defines done. This overrides the evidence ranking
+above for the new behavior (it does NOT relax the regression rule).
+
+- Before writing code, go through the statement clause by clause and record
+  every concrete thing it names as its own checklist item: each function,
+  method, class, CLI flag, config key, field name, error-message text, output
+  format, ordering rule, default value and stated edge case. Prose sentences
+  hide requirements exactly as bullet lists do - one long sentence often
+  carries five separate requirements. Track these as requirements, not as a
+  plan of which files to touch.
+- The existing suite passing proves only that you broke nothing. It cannot
+  show the new behavior is right, because no test in it covers that behavior.
+  Treat a green suite as a regression gate, never as evidence of completeness.
+- Evidence that the new behavior is right comes from exercising it against
+  what the statement literally says: run the flag, call the function, trigger
+  the error and compare the message text character by character, check the
+  ordering and the default. Check each requirement in the codebase rather than
+  from memory of having implemented it.
+- Requirements phrased as what must NOT change, or what must still hold in the
+  ordinary case ("existing behavior is unchanged", "valid input still reports
+  clean", "the no-op path stays silent"), are graded as heavily as the new
+  feature and are the easiest to break while adding it. Check them explicitly.
+"""
+
+
+SPEC_ACCEPTANCE_ENV = "RAVEN_SPEC_ACCEPTANCE"
+
+
+def _se_discipline_text() -> str:
+    """Engineering discipline block, plus the spec-acceptance override if asked."""
+    if os.environ.get(SPEC_ACCEPTANCE_ENV):
+        return _SE_DISCIPLINE + _SPEC_ACCEPTANCE
+    return _SE_DISCIPLINE
+
 
 def identity_text(workspace: Path, model: str | None = None) -> str:
     """Segment 1 — the core identity / runtime block, from the model's prompt file.
@@ -155,7 +201,7 @@ def identity_text(workspace: Path, model: str | None = None) -> str:
         "{{PLATFORM}}": f"{system.lower()} {platform.machine()}",
         "{{PYTHON}}": platform.python_version(),
         "{{TODAY}}": datetime.now().strftime("%a %b %d %Y"),
-        "{{SE_DISCIPLINE}}": _SE_DISCIPLINE,
+        "{{SE_DISCIPLINE}}": _se_discipline_text(),
         "{{PLATFORM_POLICY}}": _platform_policy(),
     }
     for sentinel, value in substitutions.items():

@@ -308,14 +308,37 @@ class AgentLoop:
     # source of false completion claims. Nudges are bounded so the gate itself
     # can never loop.
     _TEST_GATE_MAX_NUDGES = 2
+    # Runner detection spans every ecosystem the agent may be dropped into: a
+    # Python-only pattern silently withholds the gate on Go/JS/Rust repos, where
+    # it then nudges for pytest output that can never appear.
     _TEST_GATE_CMD_RE = re.compile(
         r"(pytest|runtests(?:\.py)?\b|manage\.py\s+test|(?:^|[\s/&;(])bin/test\b"
-        r"|-m\s+unittest\b|\btox\b|\bsympy\.test\(|\bdoctest\()"
+        r"|-m\s+unittest\b|\btox\b|\bsympy\.test\(|\bdoctest\("
+        r"|\bgo\s+test\b|\bgotestsum\b"
+        r"|\bcargo\s+(?:test|nextest)\b"
+        r"|\b(?:npm|yarn|pnpm|bun)\s+(?:run\s+)?test\b"
+        # jest/vitest/mocha/karma are distinctive enough to match bare; `ava`
+        # and `tap` are ordinary words (`ip link ... mode tap`), so they only
+        # count behind an explicit runner invocation.
+        r"|\b(?:npx\s+)?(?:jest|vitest|mocha|karma)\b"
+        r"|\b(?:npx|yarn|pnpm|bunx?)\s+(?:ava|tap)\b"
+        r"|\bdeno\s+test\b"
+        r"|\b(?:mvn|gradle|\./gradlew)\s+(?:\S+\s+)*test\b"
+        r"|\bctest\b|\brspec\b|\bphpunit\b|\bdotnet\s+test\b|\bswift\s+test\b"
+        r"|\bmake\s+(?:test|check)\b)"
     )
     _TEST_GATE_OUT_RE = re.compile(
         r"(\b\d+\s+(?:passed|failed|errors?|xfailed|xpassed|skipped|deselected)\b"
         r"|\bRan\s+\d+\s+tests?\b|\bOK\b|\bFAILED\b|\bPASSED\b|\bERROR\b"
-        r"|\btest process starts\b|\btests finished\b)"
+        r"|\btest process starts\b|\btests finished\b"
+        r"|^---\s+(?:PASS|FAIL|SKIP)\b|^(?:ok|FAIL)\s+\S+"  # go test
+        r"|\btest result:\s+(?:ok|FAILED)\b"  # cargo test
+        r"|\bTests?:\s+\d+|\bTest Suites:|\bTest Files\s+\d+"  # jest / vitest
+        r"|\b\d+\s+(?:passing|failing)\b"  # mocha
+        r"|\b\d+\s+tests?\s+(?:passed|failed)\b"  # ava / tap style
+        r"|\bBUILD\s+(?:SUCCESSFUL|FAILED)\b"  # gradle / maven
+        r"|\b\d+%\s+tests\s+passed\b)",  # ctest
+        re.MULTILINE,
     )
     # Terminal color codes glue onto adjacent digits/words and defeat \b
     # matching (e.g. ESC[32m201 passed) — strip before any output matching.
@@ -325,18 +348,16 @@ class AgentLoop:
     _GATE_SCRATCH_PATH_RE = re.compile(r"^(/tmp|/var/tmp|/dev/shm)(/|$)")
     _TEST_GATE_NUDGE = (
         "STOP: you are about to declare completion, but this session has not "
-        "run the repository's own test runner even once (no pytest / "
-        "runtests.py / unittest output was observed). Scripts you wrote "
+        "run the repository's own test runner even once. Scripts you wrote "
         "yourself do NOT count as verification. Locate the tests covering the "
-        "code you changed and run them with the repo's real runner (e.g. "
-        "`python -m pytest <test_file> -x -q`, or for Django "
-        "`python tests/runtests.py <app>.<TestCase> --parallel 1`), from the "
-        "repo root, using the repo environment's own `python` from PATH. If "
+        "code you changed and run them with whatever runner this repository "
+        "actually uses — `python -m pytest <test_file> -x -q`, `go test "
+        "./...`, `cargo test`, `npm test` / `npx vitest run`, `mvn test`, or "
+        "the repo's own bundled script (`bin/test`, `runtests.py`, `make "
+        "test`) — from the repo root, using the toolchain already on PATH. If "
         "the runner errors out, fix the invocation instead of falling back to "
-        "your own scripts — do NOT install packages; if pytest is unavailable, "
-        "use the repo's bundled runner (e.g. `bin/test` or `runtests.py`) or "
-        "`python -m unittest`. Only reply TASK_COMPLETE after the relevant "
-        "tests actually pass."
+        "your own scripts, and do NOT install packages. Only reply "
+        "TASK_COMPLETE after the relevant tests actually pass."
     )
     # Requirement-verification gate (opt-in via RAVEN_VERIFY_BEFORE_COMPLETE):
     # a single one-shot nudge fired the first time the model tries to finish,
@@ -362,6 +383,41 @@ class AgentLoop:
         "If you have already verified each requirement this way, reply "
         "TASK_COMPLETE again — do not redo work or change a solution that "
         "already checks out. If any check fails, fix it first."
+    )
+    # Stronger variant, selected with RAVEN_VERIFY_BEFORE_COMPLETE=spec, for
+    # tasks whose grade is "does the code do everything the statement says".
+    # The generic nudge above asks the model to re-read the task, which it
+    # answers from memory of its own plan; this one names the artifacts to
+    # enumerate (identifiers, invariants, the untouched-behaviour tests) so the
+    # re-check is driven by the statement text rather than by recollection.
+    _VERIFY_COMPLETE_NUDGE_SPEC = (
+        "Before finalizing, audit your work against the ORIGINAL task "
+        "statement — not against your memory of it. Scroll back and re-read it "
+        "verbatim, then:\n"
+        "1. Enumerate every concrete thing it names: each function, method, "
+        "class, CLI flag, config key, field name, error-message text, output "
+        "format, ordering rule and default. Prose sentences hide requirements "
+        "as reliably as bullet lists do, so go clause by clause.\n"
+        "2. For EACH item, prove from the CODEBASE that it exists and behaves "
+        "as stated by running a command — grep the symbol, exercise the flag, "
+        "trigger the error and compare the message text. Do not mark an item "
+        "satisfied from memory. An item already satisfied by pre-existing code "
+        "is fine, and some items are illustrative notation rather than symbols "
+        "to add; what must not happen is an item the statement requires that "
+        "nothing in the codebase actually implements.\n"
+        "3. Check the requirements that say what must NOT change or what must "
+        "still hold in the ordinary case — 'existing behaviour is unchanged', "
+        "'valid input still reports clean', 'the no-op path stays silent'. "
+        "These are as heavily tested as the new feature and are the easiest to "
+        "break while adding one.\n"
+        "4. Run the repository's whole test suite, not only the tests or "
+        "packages you touched: a change that satisfies the new requirement "
+        "while breaking unrelated existing tests still fails. If the suite is "
+        "sharded by package or directory, run the whole tree.\n"
+        "5. Make sure the work is saved the way the task requires (correct "
+        "branch, everything committed) — uncommitted work is not delivered.\n"
+        "Fix whatever fails. Reply TASK_COMPLETE only once every enumerated "
+        "item has been checked against actual command output."
     )
     # Soft completion reminders (opt-in via RAVEN_GATE_STALE / RAVEN_GATE_RED,
     # both require RAVEN_REQUIRE_REAL_TEST_EVIDENCE). Design contract: fire at
@@ -2005,6 +2061,14 @@ class AgentLoop:
         real_test_evidence = False
         test_gate_nudges = 0
         verify_complete_enabled = completion_gates.gate_enabled("RAVEN_VERIFY_BEFORE_COMPLETE", gates_default)
+        # The same switch also selects the wording: "spec" swaps in the variant
+        # for tasks graded on covering a written statement. Any other value only
+        # answers on/off (gate_enabled owns that), leaving the default wording.
+        verify_complete_text = (
+            self._VERIFY_COMPLETE_NUDGE_SPEC
+            if completion_gates.gate_variant("RAVEN_VERIFY_BEFORE_COMPLETE") == "spec"
+            else self._VERIFY_COMPLETE_NUDGE
+        )
         verify_complete_nudged = False
         # Evidence ledger for the soft completion reminders: what the latest
         # real-test run said (red/green/None=unparseable), and which non-doc
@@ -2494,7 +2558,7 @@ class AgentLoop:
                     logger.info(
                         "verify-before-complete gate: one-shot requirement re-check nudge before accepting completion"
                     )
-                    messages.append({"role": "user", "content": self._VERIFY_COMPLETE_NUDGE})
+                    messages.append({"role": "user", "content": verify_complete_text})
                     prev_had_tool_calls = False
                     continue
                 # Soft one-shot reminders, mutually exclusive by construction:
