@@ -36,7 +36,7 @@ class TimeBudgetReminder:
         self._pending = [t for t in _DEFAULT_THRESHOLDS if deadline_epoch > start_epoch]
 
     @classmethod
-    def from_env(cls, now: float) -> "TimeBudgetReminder | None":
+    def from_env(cls, now: float, checkpoint_default: bool = False) -> "TimeBudgetReminder | None":
         raw = os.environ.get(DEADLINE_ENV)
         if not raw:
             return None
@@ -46,7 +46,10 @@ class TimeBudgetReminder:
             return None
         if deadline <= now:
             return None
-        return cls(deadline, now, checkpoint=bool(os.environ.get(CHECKPOINT_ENV)))
+        # A truthy env value opts in exactly as before; when the env is unset
+        # the run profile's default applies (delivery="commit" turns it on).
+        checkpoint = bool(os.environ.get(CHECKPOINT_ENV)) or checkpoint_default
+        return cls(deadline, now, checkpoint=checkpoint)
 
     def poll(self, now: float) -> str | None:
         """Return a reminder line when a new threshold was crossed, else None."""

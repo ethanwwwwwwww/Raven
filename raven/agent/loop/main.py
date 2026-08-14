@@ -26,6 +26,7 @@ from raven.agent.loop.recovery import (
 )
 from raven.agent.loop.time_budget import TimeBudgetReminder
 from raven.agent.subagent import SubagentManager
+from raven.agent.profile import RunProfile, describe_effective, resolve_profile, set_current_profile
 from raven.agent.tools.ask_user import AskUserTool
 from raven.agent.tools.background import (
     BackgroundJobRegistry,
@@ -108,6 +109,7 @@ class TurnOutcome:
     checkpoint_id: str | None = None
     edited_files: list[str] = field(default_factory=list)
     gate_triggers: dict[str, int] = field(default_factory=dict)
+    profile_name: str = ""
 
 
 def format_gate_counters(counters: dict[str, int]) -> str:
@@ -506,7 +508,11 @@ class AgentLoop:
         now_fn: Callable | None = None,
         context_config: "ContextConfig | None" = None,
         runtime_config: "RuntimeConfig | None" = None,
+        # Deprecated: still honored for inference when no profile is given
+        # (True -> "interactive", False -> "legacy_oneshot", both replicating
+        # the pre-profile behavior exactly), so existing callers are unchanged.
         interactive: bool = True,
+        profile: "RunProfile | None" = None,
         jina_api_key: str | None = None,
         max_concurrent_subagents: int = 4,
         max_subagent_spawns_per_hour: int = 30,
@@ -691,8 +697,15 @@ class AgentLoop:
             runtime_config = RuntimeConfig()
         self.runtime_config = runtime_config
         self.interactive = interactive
+        # Single in-process source of truth for mode-dependent behavior; the
+        # deprecated ``interactive`` flag only feeds inference when no profile
+        # was given. Published module-wide so prompt rendering (which has no
+        # loop reference) reads the same resolution.
+        self.profile = profile if isinstance(profile, RunProfile) else resolve_profile(interactive=interactive)
+        set_current_profile(self.profile)
+        logger.info("{}", describe_effective(self.profile))
         self._checkpoint = None
-        if self._checkpoint_active(runtime_config.checkpoint.policy, interactive):
+        if self._checkpoint_active(runtime_config.checkpoint.policy, self.profile.shadow_checkpoint):
             from raven.agent.loop.checkpoint import CheckpointService
 
             try:
@@ -941,7 +954,10 @@ class AgentLoop:
         self.tools.register(SpawnTool(manager=self.subagents))
         # The QuestionBroker is a per-transport singleton, late-bound via
         # set_broker once the transport (TUI RPC server / gateway hub) exists.
-        self.tools.register(AskUserTool())
+        # Unattended profiles drop the tool entirely: no one can answer, and a
+        # tool that waits for an answer is a stall, not a question.
+        if self.profile.ask_user_enabled:
+            self.tools.register(AskUserTool())
         # ``cron`` is not a default tool: scheduling reminders is orthogonal to the
         # work a coding agent does, and its schema is the largest of any tool here.
         # ``CronService`` still runs, so jobs added through the CLI keep firing --
@@ -1133,18 +1149,18 @@ class AgentLoop:
         return messages
 
     @staticmethod
-    def _checkpoint_active(policy: str, interactive: bool) -> bool:
-        """Resolve ``runtime.checkpoint.policy`` against the call-site's
-        ``interactive`` signal. ``"interactive"`` (the default) skips the
-        snapshot for one-shot ``-m`` invocations — those have no "next turn"
-        to inject recovery into, so paying the snapshot cost there is just
-        deadweight. ``"always"`` opts in regardless; ``"never"`` opts out
-        regardless."""
+    def _checkpoint_active(policy: str, profile_default: bool) -> bool:
+        """Resolve ``runtime.checkpoint.policy`` against the run profile's
+        ``shadow_checkpoint`` default. ``"interactive"`` (the policy default)
+        follows the profile: multi-turn interactive sessions snapshot, one-shot
+        runs don't — those have no "next turn" to inject recovery into, so
+        paying the snapshot cost there is just deadweight. ``"always"`` opts in
+        regardless; ``"never"`` opts out regardless."""
         if policy == "never":
             return False
         if policy == "always":
             return True
-        return interactive  # policy == "interactive"
+        return profile_default  # policy == "interactive"
 
     def _stash_recovery(self, session_key: str, outcome: "TurnOutcome") -> None:
         """Remember an interrupted turn's snapshot so the next turn in this
@@ -2052,29 +2068,39 @@ class AgentLoop:
         malformed_resamples = 0
         call_max_tokens: int | None = None
         length_nudges = 0
-        time_budget = TimeBudgetReminder.from_env(time.time())
-        # Guardrails default on for one-shot task runs (what an evaluation harness
-        # drives) and off in interactive sessions, where finishing a turn usually
-        # means answering rather than changing code. Env vars override either way.
-        gates_default = not self.interactive
-        test_gate_enabled = completion_gates.gate_enabled("RAVEN_REQUIRE_REAL_TEST_EVIDENCE", gates_default)
+        time_budget = TimeBudgetReminder.from_env(
+            time.time(), checkpoint_default=self.profile.deadline_checkpoint
+        )
+        # Guardrail defaults come from the run profile (one-shot task runs get
+        # them on, attended sessions off — see raven.agent.profile). Env vars
+        # override either way, per gate.
+        gate_defaults = self.profile.gates
+        test_gate_enabled = completion_gates.gate_enabled(
+            "RAVEN_REQUIRE_REAL_TEST_EVIDENCE", gate_defaults.test_evidence
+        )
         real_test_evidence = False
         test_gate_nudges = 0
-        verify_complete_enabled = completion_gates.gate_enabled("RAVEN_VERIFY_BEFORE_COMPLETE", gates_default)
+        verify_complete_enabled = completion_gates.gate_enabled(
+            "RAVEN_VERIFY_BEFORE_COMPLETE", gate_defaults.verify_complete
+        )
         # The same switch also selects the wording: "spec" swaps in the variant
-        # for tasks graded on covering a written statement. Any other value only
-        # answers on/off (gate_enabled owns that), leaving the default wording.
+        # for tasks graded on covering a written statement. When the env is
+        # unset, the profile's wording applies (acceptance="spec" derives it).
+        env_wording = completion_gates.gate_variant("RAVEN_VERIFY_BEFORE_COMPLETE")
+        verify_wording = (
+            ("spec" if env_wording == "spec" else "generic") if env_wording else gate_defaults.verify_wording
+        )
         verify_complete_text = (
-            self._VERIFY_COMPLETE_NUDGE_SPEC
-            if completion_gates.gate_variant("RAVEN_VERIFY_BEFORE_COMPLETE") == "spec"
-            else self._VERIFY_COMPLETE_NUDGE
+            self._VERIFY_COMPLETE_NUDGE_SPEC if verify_wording == "spec" else self._VERIFY_COMPLETE_NUDGE
         )
         verify_complete_nudged = False
         # Evidence ledger for the soft completion reminders: what the latest
         # real-test run said (red/green/None=unparseable), and which non-doc
         # files were edited AFTER it (staleness). Both reminders are one-shot.
-        gate_stale_enabled = test_gate_enabled and completion_gates.gate_enabled("RAVEN_GATE_STALE", gates_default)
-        gate_red_enabled = test_gate_enabled and completion_gates.gate_enabled("RAVEN_GATE_RED", gates_default)
+        gate_stale_enabled = test_gate_enabled and completion_gates.gate_enabled(
+            "RAVEN_GATE_STALE", gate_defaults.stale
+        )
+        gate_red_enabled = test_gate_enabled and completion_gates.gate_enabled("RAVEN_GATE_RED", gate_defaults.red)
         last_test_status: str | None = None
         last_test_cmd = ""
         last_test_detail = ""
@@ -2084,7 +2110,9 @@ class AgentLoop:
         # Empty-diff falsification gate (2026-08, trajectory error analysis across two
         # model rounds). Same conventions as the four gates above: turn-local, one-shot,
         # facts only, on unless opted out.
-        empty_diff_gate_enabled = completion_gates.gate_enabled(completion_gates.EMPTY_DIFF_ENV, gates_default)
+        empty_diff_gate_enabled = completion_gates.gate_enabled(
+            completion_gates.EMPTY_DIFF_ENV, gate_defaults.empty_diff
+        )
         turn_code_edits = False
         empty_diff_nudged = False
         # How often each gate fired this turn. Rides on TurnOutcome so a run can be
@@ -2682,7 +2710,7 @@ class AgentLoop:
         # ``backend.feedback`` run from ``_process_message``. We surface
         # ``outcome.status`` so that pipeline can gate on completion later.
 
-        outcome = TurnOutcome(status=status, gate_triggers=gate_triggers)
+        outcome = TurnOutcome(status=status, gate_triggers=gate_triggers, profile_name=self.profile.name)
         if self._checkpoint is not None:
             # Per-turn snapshot: one commit covering all of this turn's edits,
             # for both normal and interrupted exits (matches Claude Code/Cursor
@@ -3034,9 +3062,10 @@ class AgentLoop:
             on_checkpoint=_mid_turn_checkpoint,
         )
         self._stash_recovery(key, outcome)
-        if not self.interactive:
+        if not self.profile.attended or self.profile.name == "legacy_oneshot":
             # Batch runs capture stdout but disable loguru inside the ``raven``
             # package, so the counters go to stdout directly or they are lost.
+            # legacy_oneshot keeps printing because pre-profile `-m` runs did.
             print(format_gate_counters(outcome.gate_triggers), flush=True)
 
         if final_content is None:
