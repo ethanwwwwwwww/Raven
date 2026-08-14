@@ -102,6 +102,10 @@ Implement
   every one of them.
 - Fix ALL occurrences of the same flaw (sibling functions, parallel branches,
   other call sites): possibly many sites, each getting the same minimal fix.
+  Enumerate the sites BEFORE fixing: the symbols tool (when available) lists
+  every definition and usage of a name syntax-aware — in Python it also
+  resolves aliased imports and inheritance, which text grep misses. grep still
+  covers what symbols cannot see: strings, comments, and config files.
 - Cover the input variants, modes, and boundary values of the behavior the
   requirement describes - and nothing beyond that behavior.
 

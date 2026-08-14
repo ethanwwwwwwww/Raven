@@ -47,6 +47,10 @@ dependencies = [
     # transitive dep (via lancedb) -- pinning it directly so routing keeps
     # working if upstream ever drops it.
     "numpy>=2.0,<3.0",
+    "ripgrep-bin>=15.2.0",
+    "jedi>=0.19",
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.13,<1",
 ]
 
 [project.optional-dependencies]

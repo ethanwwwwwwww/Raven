@@ -62,6 +62,16 @@ done, and stopping it on the way out fails the task.
   matters
 - Absence of a truncation marker means you saw the complete requested range
 
+## grep / find / symbols — search, truncation, spill
+
+- When `grep`/`find` results overflow the cap, the COMPLETE result is saved to a
+  file whose path appears in the output — `grep`/`read_file` that file instead of
+  re-running blind with a narrower pattern when the cut part may matter
+- `symbols` answers "where is this name defined / used" syntax-aware: strings and
+  comments are excluded, and for Python aliased imports and inheritance resolve
+  semantically. Use it to enumerate EVERY fix site before editing; use `grep` for
+  raw text (strings, comments, config)
+
 ## cron — Scheduled Reminders
 
 - Please refer to cron skill for usage.
