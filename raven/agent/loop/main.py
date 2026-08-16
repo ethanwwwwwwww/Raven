@@ -357,6 +357,10 @@ class AgentLoop:
         "cases the task calls out actually handled? Where you can, run a "
         "concrete command to verify each (inspect the file, check its size, "
         "exercise a boundary input) rather than assuming. "
+        "If at any point this session you observed a failure that is still "
+        "unresolved -- no matter how informal the evidence -- either it is "
+        "fixed by now or your final reply names it explicitly; do not omit it "
+        "because only your own script saw it. "
         "If your deliverable produces output at runtime, confirm it from a "
         "clean state: remove any scratch or demo files you created while "
         "working and run it fresh, so leftover state cannot make a broken "
@@ -395,21 +399,60 @@ class AgentLoop:
         "new failure is yours to fix). If you are certain the edits cannot\n"
         "affect behavior (e.g. comments only), you may finish now."
     )
+    # v2 (wave10): the old exit 1 accepted a one-sentence staleness claim with
+    # "no file edits or tool calls needed" -- and was walked through by tasks
+    # that rationalized self-caused regressions as stale (django-11885,
+    # sympy-15976, with gates ON). The claim now costs one baseline
+    # comparison; the soft exits stay -- removing them recreates the hard gate
+    # the replay data vetoed (10 legitimate finish-red tasks).
     _TEST_GATE_RED_NUDGE_TMPL = (
         "CHECK (shown once, before you finish): your most recent test run\n"
         "(`{cmd}`) reported failures: {detail}\n"
         "The task description is the source of truth for intended behavior.\n"
         "Decide which case this is:\n"
-        "1. The failing test asserts the exact OLD behavior the task asks to\n"
-        "   change — then the test is stale, not your patch. State in one\n"
-        "   sentence, in your reply (no file edits or tool calls needed), which\n"
-        "   requirement contradicts it, keep your fix intact, and finish (that\n"
-        "   test may remain failing). Do NOT weaken your fix or edit the test's\n"
-        "   assertions just to make it pass.\n"
-        "2. Anything else — the failure points at a real problem in your patch.\n"
-        "   Fix the patch and re-run that test. If it still fails after your\n"
-        "   fix, say so explicitly when you finish.\n"
-        "After addressing this once, you may declare completion."
+        "1. You believe a failing test asserts the exact OLD behavior the task\n"
+        "   asks to change. That claim needs baseline evidence, not assertion:\n"
+        "   show the same test already failed BEFORE your change. In a git\n"
+        "   repo: `git diff > /tmp/mypatch.diff` (keep this safety copy),\n"
+        "   then `git stash -u`, re-run that test, `git stash pop`. Outside\n"
+        "   git, re-run it on a clean copy, or point at equivalent proof that\n"
+        "   the failure predates your change. If you already ran such a\n"
+        "   baseline comparison, cite that result -- no need to redo it.\n"
+        "   A test that was green before your change and red after it is YOUR\n"
+        "   regression: fix the patch, do not reinterpret the test.\n"
+        "2. Anything else -- the failure points at a real problem in your\n"
+        "   patch. Fix the patch and re-run that test. If it still fails after\n"
+        "   your fix, say so explicitly when you finish.\n"
+        "If a baseline comparison is genuinely impossible here (rerun too\n"
+        "costly, workspace not copyable), say why, state your judgement, and\n"
+        "finish. Either way: do NOT weaken your fix or edit the test's\n"
+        "assertions just to make it pass."
+    )
+    # Stale-claim challenge (G2, rides the RAVEN_GATE_RED switch): fires when
+    # the finish text itself declares failing/changed tests stale or
+    # "updated by the test patch" while no baseline comparison was observed
+    # this turn. Pattern fitted to the deepseek offline round's wording (70
+    # tasks, 40% unresolved vs 24% baseline); on other model families it may
+    # simply never fire -- zero triggers there is NOT evidence of absence.
+    _STALE_CLAIM_RE = re.compile(
+        r"test patch(?:'s)? (?:will |would )?(?:updates?|replaces?|covers?|changes?)"
+        r"|(?:covered|updated|replaced) by the (?:pr'?s? )?test patch"
+        r"|assert(?:s|ing)? the (?:exact )?old behavior"
+        r"|intentionally (?:chang\w+|fail\w+)",
+        re.IGNORECASE,
+    )
+    _STALE_CLAIM_NUDGE = (
+        "CHECK (shown once, before you finish): your reply declares failing or\n"
+        "to-be-updated tests as stale/expected. That claim needs baseline\n"
+        "evidence, not assertion -- and how this problem was fixed elsewhere\n"
+        "is not evidence about this workspace. Show the same failure already\n"
+        "existed BEFORE your change: in a git repo, `git diff >\n"
+        "/tmp/mypatch.diff` (keep this safety copy), then `git stash -u`,\n"
+        "re-run the test, `git stash pop`; outside git, re-run on a clean\n"
+        "copy. If you already ran such a comparison, cite it and finish. If\n"
+        "it is genuinely impossible, say why, state your judgement, and\n"
+        "finish. A test that was green before your change and red after it is\n"
+        "YOUR regression: fix the patch instead of reinterpreting the test."
     )
     # Same-call breaker: once a byte-identical (tool, arguments) call has
     # hard-failed this many times running, further identical calls are refused
@@ -2032,6 +2075,16 @@ class AgentLoop:
         empty_diff_gate_enabled = completion_gates.gate_enabled(completion_gates.EMPTY_DIFF_ENV, gates_default)
         turn_code_edits = False
         empty_diff_nudged = False
+        # Shared round budget across ALL completion gates (wave10 gate
+        # economy): a turn spends at most this many nudge rounds total, so
+        # armed-but-chatty gates cannot chain (pre-rework measurement: mean
+        # 1.44 extra rounds per task, max 4).
+        max_gate_rounds = completion_gates.gate_round_budget()
+        gate_rounds_used = 0
+        # Evidence-in-hand exemption (stale-claim challenge): a model that
+        # already ran its own baseline comparison is never asked to redo it.
+        baseline_check_observed = False
+        stale_claim_nudged = False
         # How often each gate fired this turn. Rides on TurnOutcome so a run can be
         # summarised without parsing the transcript: loguru is disabled inside the
         # ``raven`` package unless ``--logs`` is passed, so gate logs alone never
@@ -2305,8 +2358,13 @@ class AgentLoop:
                     # ran, not the model's raw spelling (execute repairs
                     # mangled names like Web_Fetch -> web_fetch).
                     executed_name = self.tools.canonical_name(tool_call.name)
-                    if test_gate_enabled and executed_name == "exec":
+                    if (test_gate_enabled or verify_complete_enabled) and executed_name == "exec":
+                        # verify_complete consults this evidence too (a turn
+                        # that ran real tests has no re-check deficit), so the
+                        # ledger must be maintained when either gate is armed.
                         cmd = str((tool_call.arguments or {}).get("command", ""))
+                        if "git stash" in cmd or "git worktree" in cmd:
+                            baseline_check_observed = True
                         plain_out = self._ANSI_RE.sub("", model_text)
                         if self._TEST_GATE_CMD_RE.search(cmd) and self._TEST_GATE_OUT_RE.search(plain_out):
                             if not real_test_evidence:
@@ -2316,7 +2374,7 @@ class AgentLoop:
                             last_test_cmd = cmd.replace("\n", " ")[:200]
                             edits_since_test = []
                     elif (
-                        (gate_stale_enabled or gate_red_enabled or empty_diff_gate_enabled)
+                        (test_gate_enabled or gate_stale_enabled or gate_red_enabled or empty_diff_gate_enabled)
                         and executed_name in ("write_file", "edit_file")
                         and not _is_hard_tool_failure(model_text)
                     ):
@@ -2481,13 +2539,33 @@ class AgentLoop:
                     reasoning_content=response.reasoning_content,
                     thinking_blocks=response.thinking_blocks,
                 )
-                if (
+                # Gate economy (wave10): a gate fires only on an observable
+                # deficit and spends from one shared round budget; priority
+                # runs concrete-to-generic (missing test run > red > stale >
+                # unbacked stale claim > empty diff > requirement re-check),
+                # so the generic re-check is last in line, not a ritual.
+                test_gate_pending = (
                     test_gate_enabled
                     and not real_test_evidence
                     and test_gate_nudges < self._TEST_GATE_MAX_NUDGES
+                    and gate_rounds_used < max_gate_rounds
                     and iteration < self.max_iterations
-                ):
+                )
+                if test_gate_pending and not turn_code_edits:
+                    # "Go run the tests" is only a deficit when code actually
+                    # changed. Positive evidence required: an unknown answer
+                    # (no git, probe failure) must not restart the ritual on a
+                    # turn that plausibly changed nothing.
+                    _replayed = getattr(self.tools, "workspace_dirty", None)
+                    _dirty = (
+                        _replayed
+                        if _replayed is not None
+                        else await completion_gates.workspace_has_changes(self.workspace)
+                    )
+                    test_gate_pending = _dirty is True
+                if test_gate_pending:
                     test_gate_nudges += 1
+                    gate_rounds_used += 1
                     gate_triggers["test_evidence"] = gate_triggers.get("test_evidence", 0) + 1
                     logger.warning(
                         "test-evidence gate: refusing final answer without a real test run (nudge {}/{})",
@@ -2495,15 +2573,6 @@ class AgentLoop:
                         self._TEST_GATE_MAX_NUDGES,
                     )
                     messages.append({"role": "user", "content": self._TEST_GATE_NUDGE})
-                    prev_had_tool_calls = False
-                    continue
-                if verify_complete_enabled and not verify_complete_nudged and iteration < self.max_iterations:
-                    verify_complete_nudged = True
-                    gate_triggers["verify_complete"] = gate_triggers.get("verify_complete", 0) + 1
-                    logger.info(
-                        "verify-before-complete gate: one-shot requirement re-check nudge before accepting completion"
-                    )
-                    messages.append({"role": "user", "content": self._VERIFY_COMPLETE_NUDGE})
                     prev_had_tool_calls = False
                     continue
                 # Soft one-shot reminders, mutually exclusive by construction:
@@ -2515,9 +2584,11 @@ class AgentLoop:
                     and real_test_evidence
                     and edits_since_test
                     and not stale_nudged
+                    and gate_rounds_used < max_gate_rounds
                     and iteration < self.max_iterations
                 ):
                     stale_nudged = True
+                    gate_rounds_used += 1
                     gate_triggers["test_stale"] = gate_triggers.get("test_stale", 0) + 1
                     logger.info(
                         "test-evidence gate: stale reminder (edits after last test: {})",
@@ -2540,9 +2611,11 @@ class AgentLoop:
                     and not edits_since_test
                     and last_test_status == "red"
                     and not red_nudged
+                    and gate_rounds_used < max_gate_rounds
                     and iteration < self.max_iterations
                 ):
                     red_nudged = True
+                    gate_rounds_used += 1
                     gate_triggers["test_red"] = gate_triggers.get("test_red", 0) + 1
                     logger.info(
                         "test-evidence gate: red inquiry (last test failed: {})",
@@ -2559,6 +2632,30 @@ class AgentLoop:
                     )
                     prev_had_tool_calls = False
                     continue
+                # Stale-claim challenge (G2): the finish text itself declares
+                # failing tests stale / to-be-updated, yet no baseline
+                # comparison happened this turn. Mutually exclusive with the
+                # red/stale inquiries (same family, one question per finish)
+                # and exempt when the model already ran its own comparison.
+                if (
+                    gate_red_enabled
+                    and not stale_claim_nudged
+                    and not red_nudged
+                    and not stale_nudged
+                    and not baseline_check_observed
+                    and gate_rounds_used < max_gate_rounds
+                    and iteration < self.max_iterations
+                    and self._STALE_CLAIM_RE.search(clean or "")
+                ):
+                    stale_claim_nudged = True
+                    gate_rounds_used += 1
+                    gate_triggers["stale_claim"] = gate_triggers.get("stale_claim", 0) + 1
+                    logger.info(
+                        "stale-claim gate: finish text declares failing tests stale without baseline evidence"
+                    )
+                    messages.append({"role": "user", "content": self._STALE_CLAIM_NUDGE})
+                    prev_had_tool_calls = False
+                    continue
                 # Under replay the tools write nothing, so asking git would
                 # always answer "clean" and the gate would refuse to let a
                 # recorded trajectory finish. The replay registry tracks what the
@@ -2570,11 +2667,11 @@ class AgentLoop:
                         if replayed_dirty is not None
                         else await completion_gates.workspace_has_changes(self.workspace)
                     )
-                    if empty_diff_gate_enabled and not empty_diff_nudged
+                    if empty_diff_gate_enabled and not empty_diff_nudged and gate_rounds_used < max_gate_rounds
                     else None
                 )
                 empty_nudge = completion_gates.empty_diff_nudge(
-                    enabled=empty_diff_gate_enabled,
+                    enabled=empty_diff_gate_enabled and gate_rounds_used < max_gate_rounds,
                     code_edits_observed=turn_code_edits,
                     workspace_dirty=workspace_dirty,
                     already_nudged=empty_diff_nudged,
@@ -2583,11 +2680,34 @@ class AgentLoop:
                 )
                 if empty_nudge:
                     empty_diff_nudged = True
+                    gate_rounds_used += 1
                     gate_triggers["empty_diff"] = gate_triggers.get("empty_diff", 0) + 1
                     logger.info(
                         "empty-diff gate: finishing with no repository edits observed; asking for falsification evidence"
                     )
                     messages.append({"role": "user", "content": empty_nudge})
+                    prev_had_tool_calls = False
+                    continue
+                # Requirement re-check, LAST and conditional (wave10 M1): a
+                # turn that produced real test evidence has no re-check
+                # deficit. Before the rework this fired unconditionally on 97%
+                # of tasks (gates-on 492-task run) -- a ritual, not a gate.
+                # Turns without test-shaped evidence (typical for build-style
+                # tasks) still get the one-shot clean-state re-check.
+                if (
+                    verify_complete_enabled
+                    and not verify_complete_nudged
+                    and not real_test_evidence
+                    and gate_rounds_used < max_gate_rounds
+                    and iteration < self.max_iterations
+                ):
+                    verify_complete_nudged = True
+                    gate_rounds_used += 1
+                    gate_triggers["verify_complete"] = gate_triggers.get("verify_complete", 0) + 1
+                    logger.info(
+                        "verify-before-complete gate: one-shot requirement re-check nudge before accepting completion"
+                    )
+                    messages.append({"role": "user", "content": self._VERIFY_COMPLETE_NUDGE})
                     prev_had_tool_calls = False
                     continue
                 final_content = clean

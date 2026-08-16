@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import os
 import platform
 from datetime import datetime
 from pathlib import Path
@@ -94,20 +95,22 @@ Understand
 Implement
 - Make the smallest change per fix site that fully fixes the root cause. No
   speculative fallbacks, no compatibility shims, no extra features nobody asked
-  for.
+  for. A regression you yourself introduced and observed is always in scope:
+  remove it by narrowing or reworking the patch, not by stacking new code on
+  top. Pre-existing problems you did not cause are not - report those instead.
 - When editing an existing function, keep its signature and return type unless
   the task explicitly asks to change them (additions that break no existing
   call, like a new optional parameter, are fine). Callers and tests consume
   that interface: a better algorithm behind a changed return type still breaks
   every one of them.
 - Fix ALL occurrences of the same flaw (sibling functions, parallel branches,
-  other call sites): possibly many sites, each getting the same minimal fix.
-  Enumerate the sites BEFORE fixing: the symbols tool (when available) lists
-  every definition and usage of a name syntax-aware — in Python it also
-  resolves aliased imports and inheritance, which text grep misses. grep still
-  covers what symbols cannot see: strings, comments, and config files.
-- Cover the input variants, modes, and boundary values of the behavior the
-  requirement describes - and nothing beyond that behavior.
+  other call sites), each getting the same minimal fix. Enumerate the sites
+  BEFORE fixing: symbols (when available) lists definitions and usages
+  syntax-aware; grep covers what it cannot see - strings, comments, config.
+- Cover every input form the property stated by the requirement implies - a
+  property like "parsing is case-insensitive" covers inputs it never listed as
+  examples; enumerate by the property, not by its examples - and nothing
+  beyond that property.
 
 Verify
 - Discover how THIS project runs its own tests (test configs, CI files, scripts,
@@ -117,11 +120,20 @@ Verify
   conventions and run it through a real test runner. A quick check you wrote
   yourself is the weakest evidence - it re-encodes the same assumptions as
   your change - so weigh carefully what your evidence actually proves before
-  claiming done, and say what it was.
+  claiming done, and say what it was. The ranking grades proof of success
+  only, never permission to dismiss a failure: a failure surfaced by even your
+  weakest check is real. Fix it if it is yours or in scope; otherwise report
+  it when finishing (calling a test stale, citing the task requirement it
+  contradicts, is a valid report).
 - A test that passed before your change and fails after it is a regression YOU
   introduced: narrow or rework your patch. The only exception is a test that
   asserts the exact old behavior the task explicitly asks to change (see
   Understand) - and that exception never excuses collateral breakage elsewhere.
+- Acceptance evidence must exercise the real capability the task concerns (the
+  real backend / filesystem / runner: faking a capability the environment has
+  proves nothing), with expected values from the task statement or existing
+  tests, never from your own implementation. Mocks inside unit tests, per
+  project conventions, stay normal engineering - this binds final acceptance.
 - Building from scratch (no existing project or tests): derive verification
   from the task statement itself - check every boundary, format, file path,
   and quantity it names, one by one, against your actual output. That literal
@@ -134,6 +146,34 @@ Before declaring done
   remove debug artifacts and scratch files, and drop any edit the fix does not
   actually need.
 """
+
+
+_RECALL_GUARD_ENV = "RAVEN_RECALL_GUARD"
+# Gated, DEFAULT-OFF appendix to the identity segment (wave10). Counters a
+# measured model-level failure mode: at decision time the model treats its
+# recollection of how a problem was fixed elsewhere as authority, overriding
+# its own test observations (offline SWE round: django-13158 dropped an
+# empirically confirmed fix to "match the gold patch exactly"; django-14007
+# reasoned the eval environment out of existence from a remembered patch).
+# Wording rule (litong 2026-08-16): generic engineering language only - raven
+# runs as a real coding agent, so no benchmark / memorized-task concepts.
+# Off by default: Terminal Bench and interactive sessions stay byte-identical.
+_RECALL_GUARD = """## Grounding Over Recall
+Even when you have relevant memory or intuition about the problem at hand (you
+have seen a similar fix; you remember how it was solved elsewhere), treat it as
+a hypothesis to test, never as evidence: think it through further, then confirm
+or refute it step by step with proper tests against THIS codebase's actual
+behavior. When recollection and observation disagree, observation wins. How
+someone else fixed a problem elsewhere is never a reason to leave a defect you
+have confirmed by test in this codebase unfixed."""
+
+
+def _recall_guard_enabled() -> bool:
+    """Default-off gate: unset or an opt-out value keeps the appendix away."""
+    raw = os.environ.get(_RECALL_GUARD_ENV)
+    if raw is None:
+        return False
+    return raw.strip().lower() not in {"", "0", "false", "no", "off", "disabled"}
 
 
 def identity_text(
@@ -168,7 +208,10 @@ def identity_text(
     }
     for sentinel, value in substitutions.items():
         template = template.replace(sentinel, value)
-    return template.rstrip("\n")
+    rendered = template.rstrip("\n")
+    if _recall_guard_enabled():
+        rendered = f"{rendered}\n\n{_RECALL_GUARD}"
+    return rendered
 
 
 def load_bootstrap_files(workspace: Path, bootstrap_files: list[str] | None = None) -> str:

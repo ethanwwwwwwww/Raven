@@ -1,10 +1,35 @@
 """File system tools: read, write, edit, list."""
 
+import ast
 import difflib
 from pathlib import Path
 from typing import Any
 
 from raven.agent.tools.base import Tool
+
+
+def _python_syntax_note(fp: Path, text: str) -> str:
+    """Post-write syntax verdict for ``.py`` files, appended to the result.
+
+    Deterministic and in-band: a write/edit that leaves the file unparseable
+    is told so in the same tool result, costing zero extra rounds. Catches
+    truncated or mangled content landing silently (repaired tool arguments
+    have written partial files before). Syntax only - a line that crashes at
+    runtime still needs tests to surface.
+    """
+    if fp.suffix != ".py":
+        return ""
+    try:
+        ast.parse(text)
+    except SyntaxError as exc:
+        location = f"line {exc.lineno}" if exc.lineno else "unknown line"
+        return (
+            f"\nWARNING: {fp.name} now has a Python syntax error at {location}: "
+            f"{exc.msg}. The file cannot even be parsed; fix it before moving on."
+        )
+    except Exception:
+        return ""
+    return ""
 
 
 def _resolve_path(path: str, workspace: Path | None = None, allowed_dir: Path | None = None) -> Path:
@@ -217,9 +242,10 @@ class WriteFileTool(_FsTool):
             # "Created" vs "Overwrote" tells the model whether it just replaced
             # something that already existed - the signal that catches both
             # accidental clobbers and rewrite-the-same-file loops.
+            note = _python_syntax_note(fp, content)
             if existed:
-                return f"Overwrote existing file {fp} (was {old_size} bytes, now {len(data)} bytes)"
-            return f"Created new file {fp} ({len(data)} bytes)"
+                return f"Overwrote existing file {fp} (was {old_size} bytes, now {len(data)} bytes){note}"
+            return f"Created new file {fp} ({len(data)} bytes){note}"
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
@@ -384,8 +410,9 @@ class EditFileTool(_FsTool):
             fp.write_bytes(written.encode("utf-8"))
             if self._tracker is not None:
                 self._tracker.record(fp)
+            syntax_note = _python_syntax_note(fp, new_content)
             if replace_all and count > 1:
-                return f"Successfully edited {fp} ({count} occurrences replaced)"
+                return f"Successfully edited {fp} ({count} occurrences replaced){syntax_note}"
             # Echo the edited region back so a bad edit (wrong indentation, an
             # extra deleted line) surfaces now instead of at the next run.
             # Offsets live in the LF-normalized space, so the snippet must be
@@ -393,7 +420,7 @@ class EditFileTool(_FsTool):
             # window and echoes untouched code as if the edit missed.
             line = _line_of(content, targets[0][0])
             snippet = self._after_snippet(new_content, targets[0][0], len(norm_new))
-            return f"Successfully edited {fp} (line {line}). New content:\n{snippet}"
+            return f"Successfully edited {fp} (line {line}).{syntax_note} New content:\n{snippet}"
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:

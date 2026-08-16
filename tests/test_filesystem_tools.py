@@ -267,3 +267,39 @@ class TestDoNotAssumePathsExist:
 class TestRepositoryMapping:
     def test_list_dir_recommends_recursive_for_a_first_look(self) -> None:
         assert "recursive=true" in ListDirTool().description
+
+
+class TestPythonSyntaxNote:
+    """Wave10 P5: a .py write/edit that leaves the file syntactically broken
+    gets flagged in the tool result itself (deterministic, zero extra rounds).
+
+    Origin: truncated/mangled writes silently landing broken content (the
+    wave5 tool-args theme). Scope is honest: this catches syntax-level
+    breakage only - a runtime-only crash line (django-13401's
+    ``ModelBase < ModelBase``) still needs tests to surface.
+    """
+
+    async def test_write_file_flags_broken_python(self, tmp_path):
+        result = await WriteFileTool(workspace=tmp_path).execute(
+            path=str(tmp_path / "m.py"), content="def f(:\n    pass\n"
+        )
+        assert "syntax error" in result.lower()
+
+    async def test_write_file_quiet_on_valid_python(self, tmp_path):
+        result = await WriteFileTool(workspace=tmp_path).execute(
+            path=str(tmp_path / "m.py"), content="def f():\n    return 1\n"
+        )
+        assert "syntax error" not in result.lower()
+
+    async def test_edit_file_flags_broken_python(self, tool, tmp_path):
+        write(tmp_path, "m.py", "def f():\n    return 1\n")
+        result = await tool.execute(
+            path=str(tmp_path / "m.py"), old_text="return 1", new_text="return ("
+        )
+        assert "syntax error" in result.lower()
+
+    async def test_non_python_files_never_flagged(self, tmp_path):
+        result = await WriteFileTool(workspace=tmp_path).execute(
+            path=str(tmp_path / "notes.txt"), content="def f(:\n"
+        )
+        assert "syntax error" not in result.lower()
