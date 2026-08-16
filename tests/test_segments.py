@@ -168,6 +168,35 @@ class TestIdentity:
         assert seg.text == legacy
 
 
+class TestIdentityDate:
+    """``{{TODAY}}`` must follow the injected clock, like the runtime-context
+    block already does: with a fixed ``now_fn`` the whole system prefix is
+    reproducible, which is what ``--fake-now`` promises and what snapshot
+    replay depends on.
+    """
+
+    def test_identity_text_honors_injected_clock(self, tmp_path: Path) -> None:
+        from datetime import datetime
+
+        from raven.context_engine.segments import render
+
+        text = render.identity_text(tmp_path, now_fn=lambda: datetime(2026, 1, 2, 3, 4))
+        assert "Fri Jan 02 2026" in text
+
+    async def test_builder_threads_clock_into_identity(self, tmp_path: Path) -> None:
+        from datetime import datetime
+
+        seg = await IdentitySegmentBuilder(tmp_path, now_fn=lambda: datetime(2026, 1, 2)).build(_ctx(tmp_path))
+        assert "Fri Jan 02 2026" in seg.text
+
+    def test_identity_text_defaults_to_wall_clock(self, tmp_path: Path) -> None:
+        from datetime import datetime
+
+        from raven.context_engine.segments import render
+
+        assert datetime.now().strftime("%a %b %d %Y") in render.identity_text(tmp_path)
+
+
 class TestIdentityCarriesRetiredAssistantBehaviors:
     """Raven-X turned the assistant profile INTO the coding one; behaviors that
     were not specific to being a personal assistant must survive that move.

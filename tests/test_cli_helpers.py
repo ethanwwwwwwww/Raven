@@ -233,3 +233,34 @@ def test_make_lazy_provider_returns_lazy_without_building(monkeypatch: pytest.Mo
 
     assert isinstance(provider, LazyProvider)
     assert provider.get_default_model() == "my-model"
+
+
+def test_make_provider_replays_from_a_cassette_without_a_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With a cassette configured, provider construction must skip the credential
+    check and reach no endpoint -- the replay suite has to run with no key at all."""
+    from raven.config.loader import load_config
+    from raven.replay import ENV_CASSETTE, cassette as cassette_mod
+    from raven.replay.provider import ReplayProvider
+
+    from tests.test_replay_cassette import _write
+
+    cassette_mod._reset_for_tests()
+    monkeypatch.setenv(ENV_CASSETTE, str(_write(tmp_path)))
+    try:
+        provider = _helpers.make_provider(load_config(_write_config(tmp_path, api_key=None)))
+        assert isinstance(provider, ReplayProvider)
+        assert provider.api_key is None
+    finally:
+        cassette_mod._reset_for_tests()
+
+
+def test_make_provider_is_unchanged_without_a_cassette(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from raven.config.loader import load_config
+    from raven.providers.litellm_provider import LiteLLMProvider
+    from raven.replay import ENV_CASSETTE
+
+    monkeypatch.delenv(ENV_CASSETTE, raising=False)
+    provider = _helpers.make_provider(load_config(_write_config(tmp_path, api_key="sk-x")))
+    assert isinstance(provider, LiteLLMProvider)

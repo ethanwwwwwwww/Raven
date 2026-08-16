@@ -136,7 +136,11 @@ Before declaring done
 """
 
 
-def identity_text(workspace: Path, model: str | None = None) -> str:
+def identity_text(
+    workspace: Path,
+    model: str | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+) -> str:
     """Segment 1 — the core identity / runtime block, from the model's prompt file.
 
     ``model`` selects a per-family prompt variant and falls back to the shared
@@ -158,7 +162,7 @@ def identity_text(workspace: Path, model: str | None = None) -> str:
         "{{WORKSPACE}}": str(workspace.expanduser().resolve()),
         "{{PLATFORM}}": f"{system.lower()} {platform.machine()}",
         "{{PYTHON}}": platform.python_version(),
-        "{{TODAY}}": datetime.now().strftime("%a %b %d %Y"),
+        "{{TODAY}}": (now_fn or datetime.now)().strftime("%a %b %d %Y"),
         "{{SE_DISCIPLINE}}": _SE_DISCIPLINE,
         "{{PLATFORM_POLICY}}": _platform_policy(),
     }

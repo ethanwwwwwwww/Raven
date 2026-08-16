@@ -56,6 +56,7 @@ from raven.memory_engine.base import TokenBudget
 from raven.memory_engine.consolidate.consolidator import MemoryConsolidator, MemoryStore
 from raven.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from raven.providers.tool_args import ToolArgsLimits, coerce_arguments
+from raven.replay.tool_registry import tool_registry_for_env
 from raven.sandbox import SandboxConfig, SandboxExecutor, SandboxInitError, build_executor
 from raven.session.manager import Session, SessionManager
 from raven.spine.turn import Origin
@@ -583,7 +584,10 @@ class AgentLoop:
         # Used by eval harnesses (e.g. BCP) that need a strict tool subset.
         self._disabled_tools = set(disabled_tools or [])
         self._tool_search_config = tool_search_config
-        self.tools = ToolRegistry()
+        # Swapped at construction, not after: later lines capture
+        # ``self.tools.get_definitions`` as a deferred callable, so a
+        # replacement made further down would leave those bound to the old one.
+        self.tools = tool_registry_for_env()
 
         # Context engine — the single ContextAssembler.
         # Constructed here (after self.tools) so the factory can capture
@@ -2555,8 +2559,17 @@ class AgentLoop:
                     )
                     prev_had_tool_calls = False
                     continue
+                # Under replay the tools write nothing, so asking git would
+                # always answer "clean" and the gate would refuse to let a
+                # recorded trajectory finish. The replay registry tracks what the
+                # recording actually wrote and answers in git's place.
+                replayed_dirty = getattr(self.tools, "workspace_dirty", None)
                 workspace_dirty = (
-                    await completion_gates.workspace_has_changes(self.workspace)
+                    (
+                        replayed_dirty
+                        if replayed_dirty is not None
+                        else await completion_gates.workspace_has_changes(self.workspace)
+                    )
                     if empty_diff_gate_enabled and not empty_diff_nudged
                     else None
                 )
