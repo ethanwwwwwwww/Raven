@@ -74,6 +74,17 @@ class TestExecution:
         msg = str(exc.value)
         assert "demo__demo-1" in msg and "list_dir" in msg and "read_file" in msg
 
+    async def test_a_recorded_legacy_alias_is_not_a_divergence(self, tmp_path):
+        """A cassette recorded before a tool rename carries the legacy name
+        (e.g. "find" for today's "glob"); the alias names the same tool, so
+        replay must not report it as a trajectory divergence."""
+        glob_tool = _Spy("glob")
+        glob_tool.aliases = ("find",)
+        rows = [{"idx": 0, "tool_call_id": "c1", "name": "find", "content": "setup.py"}]
+        reg = _registry(tmp_path, tools=[glob_tool], tool_rows=rows)
+        assert await reg.execute("glob", {"path": "/w"}) == "setup.py"
+        assert glob_tool.ran is False
+
     async def test_running_past_the_recording_raises(self, tmp_path):
         reg = _registry(tmp_path)
         await reg.execute("list_dir", {"path": "/w"})

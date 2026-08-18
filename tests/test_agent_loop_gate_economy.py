@@ -177,6 +177,25 @@ async def test_test_gate_fires_after_code_edit_without_tests(workspace, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_test_gate_edit_ledger_reads_file_path_argument(workspace, monkeypatch):
+    """The schema name is file_path ("path" only survives as a legacy alias);
+    the edit ledger must recognize an edit sent under the new name."""
+    _gates(monkeypatch, RAVEN_REQUIRE_REAL_TEST_EVIDENCE="1")
+    _init_repo(workspace)
+    provider = _ScriptedProvider([
+        _tool("write_file", "w1", file_path=str(workspace / "app.py"), content="x = 2\n"),
+        _text("Fixed. Done."),
+    ])
+    agent = _agent(workspace, provider)
+
+    _f, _t, _messages, outcome = await agent._run_agent_loop(
+        [{"role": "user", "content": "fix app.py"}],
+    )
+
+    assert outcome.gate_triggers.get("test_evidence", 0) >= 1
+
+
+@pytest.mark.asyncio
 async def test_round_budget_caps_total_gate_rounds(workspace, monkeypatch):
     """M3: all gates armed, stubborn no-op turn -> at most GATE_MAX_ROUNDS."""
     _gates(

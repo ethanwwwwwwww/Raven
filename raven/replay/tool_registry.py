@@ -41,7 +41,10 @@ class ReplayToolRegistry(ToolRegistry):
     async def execute(self, name: str, params: dict[str, Any]) -> str:
         entry = self.cassette.next_tool()
         canonical = self.canonical_name(name)
-        if entry.name and canonical != entry.name:
+        # Canonicalize the recorded name too: cassettes recorded before a tool
+        # rename carry the legacy alias (e.g. "find" for today's "glob"), and
+        # that is the same tool, not a trajectory divergence.
+        if entry.name and canonical != self.canonical_name(entry.name):
             raise self.cassette.fatal(
                 ReplayToolMismatchError(
                     f"[{self.cassette.instance_id}] tool call #{entry.idx + 1} diverged: "

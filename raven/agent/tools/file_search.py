@@ -1,4 +1,4 @@
-"""Search tools: grep (content search) and find (file lookup).
+"""Search tools: grep (content search) and glob (file lookup).
 
 Both run host-side and reuse ``_FsTool``'s workspace/allowed_dir resolution so
 they share the exact same path boundary as read_file/write_file/list_dir — never
@@ -28,7 +28,7 @@ from loguru import logger
 from raven.agent.tools.filesystem import _FsTool
 from raven.sandbox.interfaces import spill_output
 
-# Noise directories skipped by the pure-Python fallback / find. ripgrep handles
+# Noise directories skipped by the pure-Python fallback / glob. ripgrep handles
 # its own ignore logic via .gitignore, so this only gates the fallback path.
 _IGNORE_DIRS = {
     ".git",
@@ -47,7 +47,7 @@ _IGNORE_DIRS = {
 }
 
 # Pseudo / system filesystem roots that must never be tree-walked. A model that
-# runs `grep <pat> /` (or find over /) would otherwise traverse the entire host
+# runs `grep <pat> /` (or glob over /) would otherwise traverse the entire host
 # — including slow network mounts under /proc, /sys, or /mnt — and hang the whole
 # run indefinitely (observed: a 47-min wedge in disk-sleep on a shared mount).
 # Searches must name a real subtree, not a system root.
@@ -215,7 +215,6 @@ class GrepTool(_FsTool):
                     "type": "integer",
                     "description": "Lines of context before and after each match, content mode only (default 0)",
                     "minimum": 0,
-                    "maximum": 20,
                 },
                 "limit": {
                     "type": "integer",
@@ -474,7 +473,7 @@ class GrepTool(_FsTool):
 
 
 # ---------------------------------------------------------------------------
-# find
+# glob
 # ---------------------------------------------------------------------------
 
 
@@ -483,9 +482,11 @@ class FindTool(_FsTool):
 
     _DEFAULT_LIMIT = 1000
 
+    aliases = ("find",)
+
     @property
     def name(self) -> str:
-        return "find"
+        return "glob"
 
     @property
     def description(self) -> str:
@@ -558,7 +559,7 @@ class FindTool(_FsTool):
                         continue
                     seen[p] = None
         except (ValueError, OSError) as e:
-            return f"Error running find: {e}"
+            return f"Error running glob: {e}"
         matches = list(seen)
         if not matches:
             return "No files found matching pattern."

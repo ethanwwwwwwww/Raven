@@ -220,7 +220,7 @@ def _is_hard_tool_failure(result: object) -> bool:
     if s.strip().rstrip(".").lower() in _EMPTY_SUCCESS_MARKERS:
         return False
     if not m and not s.lstrip().startswith("Error"):
-        # Real not-found failures (file / dir / path / old_text) all start
+        # Real not-found failures (file / dir / path / old_string) all start
         # with "Error:" or carry a non-zero exit code; anything else is
         # successful output regardless of what phrases it contains.
         return False
@@ -2378,7 +2378,10 @@ class AgentLoop:
                         and executed_name in ("write_file", "edit_file")
                         and not _is_hard_tool_failure(model_text)
                     ):
-                        path = str((tool_call.arguments or {}).get("path", ""))
+                        # The schema name is file_path; "path" is the accepted
+                        # legacy alias, so the edit ledger must read both.
+                        _args = tool_call.arguments or {}
+                        path = str(_args.get("file_path") or _args.get("path") or "")
                         if (
                             path
                             and not self._GATE_DOC_PATH_RE.search(path)

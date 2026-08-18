@@ -1,4 +1,4 @@
-"""Unit tests for the grep and find search tools.
+"""Unit tests for the grep and glob search tools.
 
 Tests exercise both the ripgrep-backed path (bundled via ripgrep-bin, resolved
 by ``resolve_rg``) and the pure-Python fallback (forced by patching
@@ -15,6 +15,7 @@ import pytest
 
 import raven.agent.tools.file_search as fs
 from raven.agent.tools.file_search import FindTool, GrepTool, _expand_braces
+from raven.agent.tools.registry import ToolRegistry
 
 
 @pytest.fixture
@@ -108,7 +109,7 @@ async def test_grep_outside_allowed_dir(tmp_path: Path):
     assert "Error" in out
 
 
-# ── find ────────────────────────────────────────────────────────────────
+# ── glob ────────────────────────────────────────────────────────────────
 
 
 async def test_find_basename_recursive(tree: Path):
@@ -368,3 +369,53 @@ async def test_find_cap_overflow_spills_complete_list(tree: Path, spill_home: Pa
     assert "complete list saved to" in out
     spilled = next(spill_home.glob("find-*.log"))
     assert spilled.read_text().count("gen_") == 20
+
+
+# ── glob rename + grep context cap ──────────────────────────────────────
+
+
+def test_grep_context_schema_has_no_maximum():
+    schema = GrepTool().parameters["properties"]["context"]
+    assert "maximum" not in schema
+    assert schema["minimum"] == 0
+
+
+async def test_grep_context_30_passes_schema_and_executes(tree: Path):
+    registry = ToolRegistry()
+    registry.register(GrepTool(workspace=tree, allowed_dir=tree))
+    result = str(await registry.execute("grep", {"pattern": "helper", "path": "src", "context": 30}))
+    assert "Invalid parameters" not in result
+    assert "util.py" in result
+
+
+def test_find_tool_is_named_glob():
+    tool = FindTool()
+    assert tool.name == "glob"
+    assert "find" in tool.aliases
+
+
+async def test_registry_resolves_find_alias_to_glob(tree: Path):
+    registry = ToolRegistry()
+    tool = FindTool(workspace=tree, allowed_dir=tree)
+    registry.register(tool)
+    assert registry.get("find") is registry.get("glob") is tool
+    assert registry.has("find")
+    assert "find" in registry
+    assert registry.canonical_name("find") == "glob"
+    result = str(await registry.execute("find", {"pattern": "*.py"}))
+    assert "app.py" in result
+
+
+def test_wire_definitions_expose_only_glob(tree: Path):
+    registry = ToolRegistry()
+    registry.register(FindTool(workspace=tree, allowed_dir=tree))
+    names = [d["function"]["name"] for d in registry.get_definitions()]
+    assert names == ["glob"]
+
+
+def test_unregister_by_legacy_name_removes_glob(tree: Path):
+    registry = ToolRegistry()
+    registry.register(FindTool(workspace=tree, allowed_dir=tree))
+    registry.unregister("find")
+    assert not registry.has("glob")
+    assert not registry.has("find")

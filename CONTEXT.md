@@ -60,7 +60,7 @@ _Avoid_: conflating with a Turn — a Subagent lives outside the main turn and r
 
 **Tool** (`agent/tools/`):
 An agent capability behind a uniform `Tool` ABC (name, parameter schema, async
-`execute`). Built-ins: file read/write/edit/list, grep/find, exec, web search/fetch,
+`execute`). Built-ins: file read/write/edit/list, grep/glob, exec, web search/fetch,
 ask_user, spawn (Subagent), MCP, media generation, and skill read/use. A reply is plain
 assistant text — there is no second reply channel.
 _Avoid_: "function" — a Tool is the agent-facing capability, not a Python function.
