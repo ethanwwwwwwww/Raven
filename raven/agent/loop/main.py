@@ -40,7 +40,6 @@ from raven.agent.tools.deep_research import (
     deep_research_mode,
 )
 from raven.agent.tools.file_search import FindTool, GrepTool
-from raven.agent.tools.symbols import SymbolsTool
 from raven.agent.tools.filesystem import EditFileTool, FileReadTracker, ListDirTool, ReadFileTool, WriteFileTool
 from raven.agent.tools.media_gen import (
     ImageGenerateTool,
@@ -856,7 +855,7 @@ class AgentLoop:
         """Register the default set of tools."""
         allowed_dir = self.workspace if self.restrict_to_workspace else None
         read_tracker = FileReadTracker()
-        for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool, GrepTool, FindTool, SymbolsTool):
+        for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool, GrepTool, FindTool):
             self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir, tracker=read_tracker))
         self._exec_sessions = ExecSessionRegistry(self._executor)
         self._background_jobs = BackgroundJobRegistry(self._executor, workspace=self.workspace)

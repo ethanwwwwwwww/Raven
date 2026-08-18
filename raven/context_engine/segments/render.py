@@ -104,8 +104,7 @@ Implement
   every one of them.
 - Fix ALL occurrences of the same flaw (sibling functions, parallel branches,
   other call sites), each getting the same minimal fix. Enumerate the sites
-  BEFORE fixing: symbols (when available) lists definitions and usages
-  syntax-aware; grep covers what it cannot see - strings, comments, config.
+  BEFORE fixing: grep for the name across code, strings, comments, and config.
 - Cover every input form the property stated by the requirement implies - a
   property like "parsing is case-insensitive" covers inputs it never listed as
   examples; enumerate by the property, not by its examples - and nothing
