@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-import os
 import platform
 from datetime import datetime
 from pathlib import Path
@@ -148,34 +147,6 @@ Before declaring done
 """
 
 
-_RECALL_GUARD_ENV = "RAVEN_RECALL_GUARD"
-# Gated, DEFAULT-OFF appendix to the identity segment (wave10). Counters a
-# measured model-level failure mode: at decision time the model treats its
-# recollection of how a problem was fixed elsewhere as authority, overriding
-# its own test observations (offline SWE round: django-13158 dropped an
-# empirically confirmed fix to "match the gold patch exactly"; django-14007
-# reasoned the eval environment out of existence from a remembered patch).
-# Wording rule (litong 2026-08-16): generic engineering language only - raven
-# runs as a real coding agent, so no benchmark / memorized-task concepts.
-# Off by default: Terminal Bench and interactive sessions stay byte-identical.
-_RECALL_GUARD = """## Grounding Over Recall
-Even when you have relevant memory or intuition about the problem at hand (you
-have seen a similar fix; you remember how it was solved elsewhere), treat it as
-a hypothesis to test, never as evidence: think it through further, then confirm
-or refute it step by step with proper tests against THIS codebase's actual
-behavior. When recollection and observation disagree, observation wins. How
-someone else fixed a problem elsewhere is never a reason to leave a defect you
-have confirmed by test in this codebase unfixed."""
-
-
-def _recall_guard_enabled() -> bool:
-    """Default-off gate: unset or an opt-out value keeps the appendix away."""
-    raw = os.environ.get(_RECALL_GUARD_ENV)
-    if raw is None:
-        return False
-    return raw.strip().lower() not in {"", "0", "false", "no", "off", "disabled"}
-
-
 def identity_text(
     workspace: Path,
     model: str | None = None,
@@ -208,10 +179,7 @@ def identity_text(
     }
     for sentinel, value in substitutions.items():
         template = template.replace(sentinel, value)
-    rendered = template.rstrip("\n")
-    if _recall_guard_enabled():
-        rendered = f"{rendered}\n\n{_RECALL_GUARD}"
-    return rendered
+    return template.rstrip("\n")
 
 
 def load_bootstrap_files(workspace: Path, bootstrap_files: list[str] | None = None) -> str:

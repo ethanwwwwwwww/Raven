@@ -1,4 +1,4 @@
-"""Wave10 discipline revisions + gated recall-guard injection.
+"""Wave10 discipline revisions (the recall-guard appendix was later removed).
 
 Every assertion below is pinned to a real failed trajectory from the
 deepseek-v4-flash offline SWE-Verified round (2026-08-14/15, run
@@ -28,8 +28,7 @@ class TestDisciplineRevisions:
         # exemption, smallest-change, evidence ranking) get diluted every time
         # the block grows. New rules must displace old lines, not stack.
         assert len(_discipline_lines()) <= 65, (
-            f"_SE_DISCIPLINE is {len(_discipline_lines())} lines; budget is 65. "
-            "Trim before adding."
+            f"_SE_DISCIPLINE is {len(_discipline_lines())} lines; budget is 65. Trim before adding."
         )
 
     def test_p1_evidence_ranking_is_one_directional(self):
@@ -80,42 +79,18 @@ class TestDisciplineRevisions:
         assert "nothing beyond that property" in text
 
 
-class TestRecallGuardInjection:
-    """RAVEN_RECALL_GUARD: gated, default-off appendix to the identity segment.
+class TestRecallGuardRemoved:
+    """The recall-guard appendix was removed entirely (litong, 2026-08-18).
 
-    litong's wording rule (2026-08-16): generic engineering language only - no
-    benchmark / memorized-task concepts. Off by default so Terminal Bench and
-    interactive sessions are byte-identical to before.
+    A stale RAVEN_RECALL_GUARD=1 in some environment or eval config must be
+    inert: the identity segment stays byte-identical whether or not the
+    retired variable is set.
     """
 
-    def _render(self, monkeypatch, value: str | None) -> str:
-        if value is None:
-            monkeypatch.delenv("RAVEN_RECALL_GUARD", raising=False)
-        else:
-            monkeypatch.setenv("RAVEN_RECALL_GUARD", value)
-        return render.identity_text(Path("/tmp/ws"), model="deepseek-v4-flash")
-
-    def test_absent_by_default(self, monkeypatch):
-        text = self._render(monkeypatch, None)
-        assert "hypothesis to test" not in text
-        assert "Grounding Over Recall" not in text
-
-    def test_enabled_appends_guard(self, monkeypatch):
-        text = self._render(monkeypatch, "1")
-        assert "Grounding Over Recall" in text
-        assert "hypothesis to test, never as evidence" in text
-        # Scope clause (efficacy review): memory as scope-judge, not only as
-        # fact-source, is what killed 13158.
-        assert "never a reason to leave a defect" in text
-
-    def test_opt_out_values_keep_it_off(self, monkeypatch):
-        for value in ("0", "false", "no", "off", "disabled", ""):
-            text = self._render(monkeypatch, value)
-            assert "Grounding Over Recall" not in text, f"value={value!r}"
-
-    def test_guard_lands_after_discipline(self, monkeypatch):
-        # Appendix placement: the shared block stays byte-stable for diffing.
-        text = self._render(monkeypatch, "1")
-        assert text.index("Grounding Over Recall") > text.index(
-            "Software Engineering Discipline"
-        )
+    def test_env_var_is_inert(self, monkeypatch):
+        monkeypatch.delenv("RAVEN_RECALL_GUARD", raising=False)
+        without = render.identity_text(Path("/tmp/ws"), model="deepseek-v4-flash")
+        monkeypatch.setenv("RAVEN_RECALL_GUARD", "1")
+        with_env = render.identity_text(Path("/tmp/ws"), model="deepseek-v4-flash")
+        assert with_env == without
+        assert "Grounding Over Recall" not in with_env
