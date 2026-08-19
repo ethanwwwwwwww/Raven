@@ -154,6 +154,28 @@ def ensure_everos_home() -> None:
         logger.info("created %s from template", target)
 
 
+def everos_models_configured() -> bool:
+    """Whether the local EverOS runtime has the credentials it needs to boot.
+
+    A keyless ``everos server start`` refuses to come up
+    (``LLMNotConfiguredError``), so "memory on by default" is only honest
+    when this returns True. Per section, the env var wins over the user
+    toml, mirroring EverOS's own settings precedence. Both the LLM and the
+    embedding key are required: the server boots on the LLM key alone but
+    every search then fails at runtime, which the recall path surfaces as
+    a failed turn.
+    """
+
+    def _key(section: str) -> str:
+        env = os.environ.get(f"EVEROS_{section.upper()}__API_KEY")
+        if env and env.strip():
+            return env
+        value = (load_everos_config().get(section) or {}).get("api_key", "")
+        return value.strip() if isinstance(value, str) else ""
+
+    return bool(_key("llm")) and bool(_key("embedding"))
+
+
 def load_everos_config() -> dict[str, Any]:
     """Return the parsed user-level toml, or ``{}`` when absent."""
     path = get_everos_config_path()

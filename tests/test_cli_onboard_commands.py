@@ -1767,16 +1767,17 @@ def test_skip_memory_disables_backend_effective(tmp_env: Path, everos_isolated: 
     assert load_raven_config().memory.backend is None
 
 
-def test_fresh_bootstrap_defaults_memory_backend_off(
+def test_fresh_bootstrap_defaults_memory_backend_on(
     tmp_env: Path, stub_verify, stub_step3, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A fresh config seeds memory.backend=None (schema default). Step 4 of the
-    wizard is what turns EverOS on, so an unattended install never contacts a
-    memory server it was never configured for."""
+    """A fresh config seeds memory.backend="everos" (the swarm-line schema
+    default). Step 4 of the wizard resolves it back to None when memory is
+    opted out or its models stay unconfigured, so an unattended keyless
+    install still never contacts a memory server."""
     onboard_commands._bootstrap_empty_config()
     from raven.config.raven import load_raven_config
 
-    assert load_raven_config().memory.backend is None
+    assert load_raven_config().memory.backend == "everos"
 
 
 def test_fresh_bootstrap_seeds_extension_blocks(tmp_env: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1786,7 +1787,7 @@ def test_fresh_bootstrap_seeds_extension_blocks(tmp_env: Path, monkeypatch: pyte
     onboard_commands._bootstrap_empty_config()
     data = json.loads(tmp_env.read_text())
 
-    assert data["memory"]["backend"] is None  # schema default seeded
+    assert data["memory"]["backend"] == "everos"  # schema default seeded
     assert data["memory"]["memoryTopK"] == 5
     assert "mode" not in data["plugins"]["config"]["everos-memory"]
     assert data["plugins"]["config"]["everos-memory"]["base_url"] == "http://localhost:18791"

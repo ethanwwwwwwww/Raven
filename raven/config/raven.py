@@ -1125,14 +1125,19 @@ class MemoryConfig(_Base):
     recall side and the store side cannot drift onto different ids.
     """
 
-    backend: str | None = None
+    backend: str | None = "everos"
     """Activated backend contribution name -- the single knob that turns
-    plugin-driven memory on and off. Off by default: a coding agent is
-    graded on one repository at a time, and recalled memory from earlier
-    tasks changes the prompt an evaluation believes it is measuring. Set
-    to ``"everos"`` to enable. ``None`` builds no backend at all, so no
-    EverOS home is seeded, no server is contacted and the ``# Memory``
-    segment stays empty."""
+    plugin-driven memory on and off. On by default on the swarm line: a
+    daily-use worker should remember. When the field is LEFT AT this
+    default and the local EverOS runtime has no model keys, the plugin
+    stack degrades to "no memory" (log line names the fix) so a keyless
+    install never pays for it; stating ``"everos"`` explicitly skips the
+    degrade and surfaces the startup error. Evaluation configs must pin
+    ``null``: recalled memory from
+    earlier tasks changes the prompt an evaluation believes it is
+    measuring. ``None`` builds no backend at all, so no EverOS home is
+    seeded, no server is contacted and the ``# Memory`` segment stays
+    empty."""
 
     user_id: str = "default"
     """Bare user identity passed as ``backend.recall(user_id=...)`` for

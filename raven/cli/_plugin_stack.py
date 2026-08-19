@@ -138,6 +138,27 @@ def maybe_build_memory_backend(
     name = config.memory.backend
     if name is None:
         return None
+    if (
+        name == "everos"
+        and "backend" not in config.memory.model_fields_set
+        and not (config.plugins.config.get("everos-memory") or {}).get("base_url")
+    ):
+        # Memory defaults on for this line, but a keyless local EverOS
+        # refuses to boot -- and the one-shot path is fail-fast, so honoring
+        # the DEFAULT on a keyless install would turn every -m run into a
+        # 30s hang + exit 1. The default therefore degrades to "no memory"
+        # with the fix named. An explicit ``memory.backend: "everos"`` in
+        # the user config skips this: stated intent should fail loudly with
+        # the startup error rather than be silently un-chosen.
+        from raven.config.update_everos import everos_models_configured
+
+        if not everos_models_configured():
+            logger.info(
+                "memory stays off: the local EverOS runtime has no model keys. "
+                "Run `raven onboard` (memory step) or set EVEROS_LLM__API_KEY "
+                "and EVEROS_EMBEDDING__API_KEY to enable recall.",
+            )
+            return None
     if registry is None:
         registry = build_plugin_registry(config)
     plugin_slice = _resolve_plugin_config_slice(registry, config, name)

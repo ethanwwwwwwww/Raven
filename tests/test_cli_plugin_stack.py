@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from raven.cli._plugin_stack import (
     build_plugin_registry,
     maybe_build_memory_backend,
@@ -333,3 +335,65 @@ class TestIdentityIsSingleSourced:
         backend = maybe_build_memory_backend(tmp_path, config)
         assert backend is not None
         assert backend._user_id == "override"
+
+
+# ---------------------------------------------------------------------------
+# Keyless default degrade (swarm line: memory defaults on)
+# ---------------------------------------------------------------------------
+
+
+class TestKeylessDefaultDegrade:
+    """memory.backend defaults to "everos" on this line, but a keyless local
+    EverOS refuses to boot and the one-shot path is fail-fast -- honoring the
+    default on a keyless install would turn every -m run into a 30s hang +
+    exit 1. The DEFAULT therefore degrades to no-memory; explicit intent and
+    remote deployments do not."""
+
+    def test_unset_default_without_keys_degrades_to_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import raven.config.update_everos as ue
+
+        monkeypatch.setattr(ue, "everos_models_configured", lambda: False)
+        backend = maybe_build_memory_backend(tmp_path, RavenConfig())
+        assert backend is None
+
+    def test_unset_default_with_keys_builds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import raven.config.update_everos as ue
+
+        monkeypatch.setattr(ue, "everos_models_configured", lambda: True)
+        backend = maybe_build_memory_backend(tmp_path, RavenConfig())
+        assert backend is not None
+
+    def test_explicit_everos_without_keys_still_builds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Stated intent must fail loudly at start(), not be silently
+        un-chosen here."""
+        import raven.config.update_everos as ue
+
+        monkeypatch.setattr(ue, "everos_models_configured", lambda: False)
+        backend = maybe_build_memory_backend(
+            tmp_path, _config(memory_backend="everos")
+        )
+        assert backend is not None
+
+    def test_unset_default_with_remote_base_url_builds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A configured base_url names a remote service; local model keys
+        are irrelevant to it."""
+        import raven.config.update_everos as ue
+
+        monkeypatch.setattr(ue, "everos_models_configured", lambda: False)
+        backend = maybe_build_memory_backend(
+            tmp_path,
+            RavenConfig(
+                plugins=PluginsConfig(
+                    config={"everos-memory": {"base_url": "http://mem.example:9"}},
+                ),
+            ),
+        )
+        assert backend is not None

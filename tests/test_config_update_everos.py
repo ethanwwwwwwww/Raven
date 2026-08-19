@@ -242,3 +242,45 @@ def test_importing_the_cli_does_not_resolve_everos_settings() -> None:
         check=True,
     )
     assert out.stdout.strip() == "False", out.stdout
+
+
+# ---------------------------------------------------------------------------
+# everos_models_configured
+# ---------------------------------------------------------------------------
+
+
+class TestModelsConfigured:
+    @pytest.fixture(autouse=True)
+    def _no_env_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("EVEROS_LLM__API_KEY", raising=False)
+        monkeypatch.delenv("EVEROS_EMBEDDING__API_KEY", raising=False)
+
+    def test_absent_config_and_env_is_unconfigured(self) -> None:
+        assert ue.everos_models_configured() is False
+
+    def test_both_toml_keys_configure(self, everos_home: Path) -> None:
+        everos_home.parent.mkdir(parents=True, exist_ok=True)
+        everos_home.write_text(
+            '[llm]\napi_key = "k1"\n\n[embedding]\napi_key = "k2"\n'
+        )
+        assert ue.everos_models_configured() is True
+
+    def test_llm_key_alone_is_not_enough(self, everos_home: Path) -> None:
+        """The server boots on the LLM key alone but every search then fails
+        at runtime, which the recall path surfaces as a failed turn."""
+        everos_home.parent.mkdir(parents=True, exist_ok=True)
+        everos_home.write_text('[llm]\napi_key = "k1"\n')
+        assert ue.everos_models_configured() is False
+
+    def test_env_fills_a_section_the_toml_leaves_empty(
+        self, everos_home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        everos_home.parent.mkdir(parents=True, exist_ok=True)
+        everos_home.write_text('[llm]\napi_key = "k1"\n\n[embedding]\napi_key = ""\n')
+        monkeypatch.setenv("EVEROS_EMBEDDING__API_KEY", "k2")
+        assert ue.everos_models_configured() is True
+
+    def test_whitespace_keys_do_not_count(self, everos_home: Path) -> None:
+        everos_home.parent.mkdir(parents=True, exist_ok=True)
+        everos_home.write_text('[llm]\napi_key = "  "\n\n[embedding]\napi_key = " "\n')
+        assert ue.everos_models_configured() is False
