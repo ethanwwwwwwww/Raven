@@ -57,6 +57,17 @@ def gate_enabled(env_name: str, default: bool = True) -> bool:
     return raw.strip().lower() not in _OPT_OUT_VALUES
 
 
+def gate_variant(env_name: str) -> str:
+    """The switch's value as a lowercase variant name, "" when unset.
+
+    A switch answers on/off through :func:`gate_enabled`; a gate whose wording
+    has more than one form reads the same value here to pick which one. Keeping
+    both readings in this module means callers never re-derive the env
+    conventions themselves.
+    """
+    return (os.environ.get(env_name) or "").strip().lower()
+
+
 def empty_diff_nudge(
     *,
     enabled: bool,
