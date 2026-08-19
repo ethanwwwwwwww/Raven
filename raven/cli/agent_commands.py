@@ -175,6 +175,11 @@ def register(app: typer.Typer) -> None:
                 "Default infers from the invocation (REPL vs -m)."
             ),
         ),
+        domain: str | None = typer.Option(
+            None,
+            "--domain",
+            help="Task domain: coding (default) or data. Selects the identity prompt.",
+        ),
         markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
         logs: bool = typer.Option(False, "--logs/--no-logs", help="Show Raven runtime logs during chat"),
         wait_skill_extract: bool = typer.Option(
@@ -371,6 +376,8 @@ def register(app: typer.Typer) -> None:
                 cli=profile,
                 config=config.agents.defaults.run_profile or None,
                 interactive=message is None,
+                domain_cli=domain,
+                domain_config=config.agents.defaults.domain or None,
             ),
             response_modifier=sentinel_response_modifier,
             on_user_inbound=sentinel_on_user_inbound,

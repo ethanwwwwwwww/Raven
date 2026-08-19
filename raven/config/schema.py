@@ -284,6 +284,10 @@ class AgentDefaults(Base):
     # write (coding/assistant prompt selector) and must stay ignored. Harnesses
     # should select run profiles via RAVEN_PROFILE, the skew-safe channel.
     run_profile: str = ""
+    # Task domain ("coding" / "data"); "" keeps raven's coding default. Selects
+    # the identity-prompt directory, and is orthogonal to run_profile -- one
+    # profile serves several domains. --domain and RAVEN_DOMAIN override it.
+    domain: str = ""
     max_tokens: int = 8192
     context_window_tokens: int = 65_536
     temperature: float = 0.1

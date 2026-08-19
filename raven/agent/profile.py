@@ -221,6 +221,8 @@ def resolve_profile(
     cli: str | None = None,
     config: str | None = None,
     interactive: bool | None = None,
+    domain_cli: str | None = None,
+    domain_config: str | None = None,
 ) -> RunProfile:
     """Resolve the process's RunProfile. Called once, at loop construction.
 
@@ -228,6 +230,10 @@ def resolve_profile(
     the deprecated ``interactive`` flag. An invalid value at one level falls
     through to the next (with a warning), never raises — a raven older than
     a value must keep running, and so must a raven newer than one.
+
+    Domain has its own chain (cli > env RAVEN_DOMAIN > config > preset) because
+    it is orthogonal to the profile: one profile serves several domains, so a
+    config that pins a domain must not also have to pin a profile.
     """
     base: RunProfile | None = None
     source = "inferred"
@@ -248,8 +254,10 @@ def resolve_profile(
         base = replace(base, delivery=delivery)
     if acceptance := _valid_or_warn(os.environ.get(ACCEPTANCE_ENV), ACCEPTANCES, "acceptance"):
         base = replace(base, acceptance=acceptance)
-    if domain := _valid_or_warn(os.environ.get(DOMAIN_ENV), DOMAINS, "domain"):
-        base = replace(base, domain=domain)
+    for candidate in (domain_cli, os.environ.get(DOMAIN_ENV), domain_config):
+        if domain := _valid_or_warn(candidate, DOMAINS, "domain"):
+            base = replace(base, domain=domain)
+            break
     return _derive(replace(base, source=source))
 
 

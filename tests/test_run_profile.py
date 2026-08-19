@@ -276,3 +276,24 @@ def test_derive_strips_a_hard_stop_from_an_attended_profile() -> None:
     """A future preset cannot get the attended invariant wrong."""
     bad = replace(PROFILES["eval_coding"], attended=True)
     assert run_profile._derive(bad).deadline_hard_stop_sec is None
+
+
+def test_domain_precedence_cli_over_env_over_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(DOMAIN_ENV, "data")
+    assert resolve_profile(domain_config="coding").domain == "data"
+    assert resolve_profile(domain_cli="coding", domain_config="data").domain == "coding"
+    monkeypatch.delenv(DOMAIN_ENV, raising=False)
+    assert resolve_profile(domain_config="data").domain == "data"
+    assert resolve_profile().domain == "coding"
+
+
+def test_domain_needs_no_run_profile() -> None:
+    """A config may pin a domain without pinning a profile."""
+    resolved = resolve_profile(domain_config="data", interactive=True)
+    assert resolved.name == "interactive"
+    assert resolved.domain == "data"
+
+
+def test_invalid_domain_at_one_level_falls_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(DOMAIN_ENV, raising=False)
+    assert resolve_profile(domain_cli="astrology", domain_config="data").domain == "data"
