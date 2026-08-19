@@ -11,10 +11,9 @@ until the reading that produced them is committed with a reason.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
-
-import re
 
 from raven.agent.tools.base import Tool
 from raven.plugin.context import PluginContext

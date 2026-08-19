@@ -20,7 +20,7 @@ from typing import Any
 from raven.agent.tools.base import Tool
 from raven.plugin.context import PluginContext
 from raven.plugin.data_agent.session import DataAgentSession
-from raven.plugin.data_agent.sqlgate import SqlRejected, ensure_read_only
+from raven.plugin.data_agent.sqlgate import SqlRejectedError, ensure_read_only
 
 _MAX_COLUMNS = 4
 _TOP_VALUES = 3
@@ -168,7 +168,7 @@ class GrainCheckTool(Tool):
                     )
                 else:
                     lines.append(f'key check: "{key_column}" is unique across the export.')
-        except SqlRejected as exc:
+        except SqlRejectedError as exc:
             return f"[GRAIN_CHECK REJECTED] {exc}"
         except RuntimeError as exc:
             return (

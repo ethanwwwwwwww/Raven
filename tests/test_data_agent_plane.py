@@ -14,7 +14,7 @@ import pytest
 from raven.plugin.context import PluginContext, ServiceLocator
 from raven.plugin.data_agent import tools as dat
 from raven.plugin.data_agent.session import DataAgentSession, SourceSpec
-from raven.plugin.data_agent.sqlgate import SqlRejected, ensure_read_only, wrap_with_cap
+from raven.plugin.data_agent.sqlgate import SqlRejectedError, ensure_read_only, wrap_with_cap
 
 
 @pytest.fixture
@@ -69,7 +69,7 @@ def _ctx(session, tmp_path):
     ],
 )
 def test_gate_rejects_writes_and_stacking(bad):
-    with pytest.raises(SqlRejected):
+    with pytest.raises(SqlRejectedError):
         ensure_read_only(bad)
 
 
@@ -593,8 +593,9 @@ async def test_grain_check_error_paths(session):
 
 
 async def test_submit_answer_writes_rows_and_adjudication(tmp_path):
-    from raven.plugin.data_agent.deliver import SubmitAnswerTool
     import json as _json
+
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
 
     tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"))
     out = await tool.execute(

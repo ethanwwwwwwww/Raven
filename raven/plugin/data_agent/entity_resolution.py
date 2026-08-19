@@ -24,7 +24,7 @@ from typing import Any
 from raven.agent.tools.base import Tool
 from raven.plugin.context import PluginContext
 from raven.plugin.data_agent.session import DataAgentSession
-from raven.plugin.data_agent.sqlgate import SqlRejected, ensure_read_only
+from raven.plugin.data_agent.sqlgate import SqlRejectedError, ensure_read_only
 
 _MAX_DISTINCT = 20_000
 _NEIGHBOR_WINDOW = 10
@@ -103,7 +103,7 @@ class ResolveEntitiesTool(Tool):
             )
         try:
             ensure_read_only(source)
-        except SqlRejected as exc:
+        except SqlRejectedError as exc:
             return f"[RESOLVE_ENTITIES REJECTED] {exc}"
         resp = await asyncio.to_thread(self._session.sql, source, preview=_MAX_DISTINCT + 1)
         if not resp.get("ok"):

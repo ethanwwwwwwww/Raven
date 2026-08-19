@@ -28,7 +28,7 @@ _LEXICAL_DENY = (
 )
 
 
-class SqlRejected(ValueError):
+class SqlRejectedError(ValueError):
     """Raised when a statement is not a single read-only query."""
 
 
@@ -58,27 +58,27 @@ def _strip_comments_and_strings(sql: str) -> str:
 
 
 def ensure_read_only(sql: str) -> None:
-    """Raise SqlRejected unless ``sql`` is exactly one read-only statement."""
+    """Raise SqlRejectedError unless ``sql`` is exactly one read-only statement."""
     bare = _strip_comments_and_strings(sql).strip().rstrip(";")
     if not bare:
-        raise SqlRejected("empty statement")
+        raise SqlRejectedError("empty statement")
     # Statement stacking: a bare ';' between two statements survives the strip.
     if ";" in bare:
-        raise SqlRejected("multiple statements are not allowed; send one query")
+        raise SqlRejectedError("multiple statements are not allowed; send one query")
     lowered = f"{bare.lower()} "
     for tok in _LEXICAL_DENY:
         if lowered.startswith(tok) or f" {tok}" in lowered or f"({tok}" in lowered:
-            raise SqlRejected(f"disallowed keyword near {tok.strip()!r}; only read-only queries are allowed")
+            raise SqlRejectedError(f"disallowed keyword near {tok.strip()!r}; only read-only queries are allowed")
     try:
         parsed = sqlglot.parse(sql, read="duckdb")
     except Exception as exc:  # fail-closed: unparseable -> rejected
-        raise SqlRejected(f"could not parse SQL: {exc}") from exc
+        raise SqlRejectedError(f"could not parse SQL: {exc}") from exc
     statements = [s for s in parsed if s is not None]
     if len(statements) != 1:
-        raise SqlRejected("send exactly one statement")
+        raise SqlRejectedError("send exactly one statement")
     top = statements[0]
     if not isinstance(top, _READONLY_TOP):
-        raise SqlRejected(f"only read-only queries are allowed, got {type(top).__name__.upper()}")
+        raise SqlRejectedError(f"only read-only queries are allowed, got {type(top).__name__.upper()}")
 
 
 def wrap_with_cap(sql: str, cap: int) -> str:

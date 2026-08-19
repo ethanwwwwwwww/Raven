@@ -20,7 +20,7 @@ from typing import Any
 from raven.agent.tools.base import Tool
 from raven.plugin.context import PluginContext
 from raven.plugin.data_agent.session import DataAgentSession, get_session, parse_sources
-from raven.plugin.data_agent.sqlgate import SqlRejected, ensure_read_only, wrap_with_cap
+from raven.plugin.data_agent.sqlgate import SqlRejectedError, ensure_read_only, wrap_with_cap
 
 _PREVIEW_ROWS = 50
 _HARD_ROW_CAP = 100_000
@@ -51,7 +51,8 @@ def _fmt_table(cols: list[str], rows: list[list], limit: int = _PREVIEW_ROWS, to
     for r in head:
         for i, v in enumerate(r):
             widths[i] = min(60, max(widths[i], len(str(v))))
-    line = lambda vals: " | ".join(str(v)[:60].ljust(widths[i]) for i, v in enumerate(vals))
+    def line(vals):
+        return " | ".join(str(v)[:60].ljust(widths[i]) for i, v in enumerate(vals))
     out = [line(cols), "-+-".join("-" * w for w in widths)]
     out += [line(r) for r in head]
     remaining = (total if total is not None else len(rows)) - len(head)
@@ -116,7 +117,7 @@ class SqlTool(Tool):
     async def execute(self, query: str, save_as: str | None = None) -> str:
         try:
             ensure_read_only(query)
-        except SqlRejected as exc:
+        except SqlRejectedError as exc:
             return f"[SQL REJECTED] {exc}"
         capped = wrap_with_cap(query, _HARD_ROW_CAP)
         resp = await asyncio.to_thread(

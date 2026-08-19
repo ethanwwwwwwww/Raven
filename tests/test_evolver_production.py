@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from raven.evolver.analysis.stability_bucket import StabilityBucket, TaskStability
 from raven.evolver.orchestrator.config import OrchestratorConfig
 from raven.evolver.orchestrator.production import build_evolution_orchestrator

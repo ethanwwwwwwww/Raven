@@ -22,7 +22,7 @@ from typing import Any
 from raven.agent.tools.base import Tool
 from raven.plugin.context import PluginContext
 from raven.plugin.data_agent.session import DataAgentSession
-from raven.plugin.data_agent.sqlgate import SqlRejected, ensure_read_only
+from raven.plugin.data_agent.sqlgate import SqlRejectedError, ensure_read_only
 
 _MAX_ROWS = 500_000
 _MIN_LABELED = 30
@@ -153,7 +153,7 @@ class BootstrapClassifierTool(Tool):
         for statement in (train_sql, corpus_sql):
             try:
                 ensure_read_only(statement)
-            except SqlRejected as exc:
+            except SqlRejectedError as exc:
                 return f"[BOOTSTRAP_CLASSIFIER REJECTED] {exc}"
 
         train = await asyncio.to_thread(self._session.sql, train_sql, preview=_MAX_ROWS)

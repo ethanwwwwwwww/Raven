@@ -49,7 +49,7 @@ def _tokens(name: str) -> set[str]:
     return out
 
 
-class _Timeout(Exception):
+class _TimeoutError(Exception):
     pass
 
 
@@ -86,7 +86,7 @@ class SurveySourcesTool(Tool):
 
     async def _q(self, sql: str, deadline: float, preview: int = 32) -> list:
         if time.monotonic() > deadline:
-            raise _Timeout()
+            raise _TimeoutError()
         resp = await asyncio.to_thread(self._session.sql, sql, preview=preview)
         # Attach failures and other kernel bootstrap notes ride on responses;
         # a survey that silently sees 0 tables is worse than one that says why.
@@ -111,7 +111,7 @@ class SurveySourcesTool(Tool):
                 hard_deadline,
                 preview=200,
             )
-        except (RuntimeError, _Timeout) as exc:
+        except (RuntimeError, _TimeoutError) as exc:
             return f"[SURVEY ERROR] cannot enumerate tables: {exc}"
         import ast
 
@@ -141,7 +141,7 @@ class SurveySourcesTool(Tool):
             deadline = min(hard_deadline, time.monotonic() + _SOURCE_BUDGET_SEC)
             try:
                 total = int((await self._q(f"SELECT COUNT(*) FROM {fq}", deadline))[0][0])
-            except (RuntimeError, _Timeout) as exc:
+            except (RuntimeError, _TimeoutError) as exc:
                 notes.append(f"## {label}: [unreadable: {exc}]")
                 continue
             cols = list(zip(col_names, col_types))[:_MAX_COLUMNS_PER_TABLE]
@@ -166,7 +166,7 @@ class SurveySourcesTool(Tool):
                         k in lower for k in ("int", "decimal", "double", "float", "numeric", "hugeint")
                     ):
                         await self._numeric_probe(fq, q, fact, deadline)
-                except _Timeout:
+                except _TimeoutError:
                     fact["note"] = "budget hit"
                 except RuntimeError as exc:
                     fact["note"] = f"error {str(exc)[:60]}"
@@ -213,7 +213,7 @@ class SurveySourcesTool(Tool):
                 for line in await self._fd_pairs(fq, facts, deadline):
                     notes.append(line)
                     summary.append(f"{label}: {line}")
-            except (_Timeout, RuntimeError):
+            except (_TimeoutError, RuntimeError):
                 pass
             notes.append("")
 
@@ -256,7 +256,7 @@ class SurveySourcesTool(Tool):
                     "SELECT database_name FROM duckdb_databases()", hard_deadline
                 )
                 head += "attached catalogs: " + ", ".join(str(r[0]) for r in dbs) + "\n"
-            except (RuntimeError, _Timeout) as exc:
+            except (RuntimeError, _TimeoutError) as exc:
                 head += f"duckdb_databases() probe failed: {exc}\n"
         return head + "\n".join(summary)[: _SUMMARY_CHARS]
 
