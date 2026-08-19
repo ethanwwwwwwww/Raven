@@ -36,13 +36,14 @@ class _FakeAdapter:
         self.search_raises: Exception | None = None
         self.memorize_raises: Exception | None = None
 
-    async def search(self, *, user_id, agent_id, query, top_k):
+    async def search(self, *, user_id, agent_id, query, top_k, session_id=None):
         self.search_calls.append(
             {
                 "user_id": user_id,
                 "agent_id": agent_id,
                 "query": query,
                 "top_k": top_k,
+                "session_id": session_id,
             }
         )
         if self.search_raises is not None:
@@ -55,16 +56,12 @@ class _FakeAdapter:
         payload_messages,
         *,
         is_final=False,
-        app_id=None,
-        project_id=None,
     ):
         self.memorize_calls.append(
             {
                 "session_id": session_id,
                 "payload_messages": payload_messages,
                 "is_final": is_final,
-                "app_id": app_id,
-                "project_id": project_id,
             }
         )
         if self.memorize_raises is not None:
@@ -342,15 +339,18 @@ class TestAgentSearchConversion:
 
 
 class TestErrorIsolation:
-    async def test_adapter_search_exception_returns_empty(
+    async def test_adapter_search_exception_propagates(
         self,
         tmp_path: Path,
     ) -> None:
+        """An unreachable EverOS used to be reported as an empty result, which
+        is indistinguishable from a store holding nothing relevant -- a whole
+        session could recall nothing and look healthy."""
         adapter = _FakeAdapter()
         adapter.search_raises = RuntimeError("everos unreachable")
         b = _backend(tmp_path, adapter=adapter)
-        hits = await b.recall("q", user_id="x", top_k=5)
-        assert hits == []  # logged + swallowed
+        with pytest.raises(RuntimeError, match="everos unreachable"):
+            await b.recall("q", user_id="x", top_k=5)
 
     async def test_none_response_returns_empty(self, tmp_path: Path) -> None:
         adapter = _FakeAdapter(search_response=None)
@@ -551,3 +551,28 @@ class TestFeedback:
         await b.feedback({})
         await b.feedback({"kind": "skill_usage", "ids": ["x"]})
         await b.feedback({"arbitrary": object()})
+
+
+class TestStoreRejectsPerCallScope:
+    """A caller passing app_id/project_id believed it was choosing a bucket
+    while the value was dropped on the floor. Silently ignoring it is the
+    failure mode this whole scope rework exists to remove."""
+
+    async def test_scope_in_metadata_raises(self, tmp_path: Path) -> None:
+        b = _backend(tmp_path)
+        with pytest.raises(ValueError, match="storage scope"):
+            await b.store(
+                "s",
+                [{"role": "user", "content": "hi"}],
+                metadata={"project_id": "somewhere-else"},
+            )
+
+    async def test_is_final_metadata_still_accepted(self, tmp_path: Path) -> None:
+        adapter = _FakeAdapter()
+        b = _backend(tmp_path, adapter=adapter)
+        await b.store(
+            "s",
+            [{"role": "user", "content": "hi"}],
+            metadata={"is_final": True},
+        )
+        assert adapter.memorize_calls[0]["is_final"] is True

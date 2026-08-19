@@ -120,6 +120,10 @@ def maybe_build_memory_backend(
        ``config.plugins.config`` — first by plugin id (the canonical
        key, e.g. ``"everos-memory"``), then by backend contribution
        name (the friendlier key, e.g. ``"everos"``) as a fallback.
+    4. Fold ``memory.user_id`` / ``memory.agent_id`` into that slice.
+       The recall side reads them from ``memory``, the store side from
+       the slice; leaving both authoritative meant a config that set
+       only one wrote to a track it never searched.
 
     The returned backend has **not** been ``await``-started — the
     caller (CLI bootstrap) is responsible for the
@@ -132,6 +136,11 @@ def maybe_build_memory_backend(
     if registry is None:
         registry = build_plugin_registry(config)
     plugin_slice = _resolve_plugin_config_slice(registry, config, name)
+    plugin_slice = {
+        "user_id": config.memory.user_id,
+        "agent_id": config.memory.agent_id,
+        **plugin_slice,
+    }
     services = ServiceLocator(workspace=workspace)
     try:
         backend = registry.build_memory_backend(
@@ -158,6 +167,35 @@ def maybe_build_memory_backend(
         )
         return None
     return backend
+
+
+async def start_memory_backend(
+    backend: "MemoryBackend | None",
+    *,
+    fail_fast: bool,
+) -> None:
+    """Bring a memory backend online.
+
+    ``fail_fast`` separates the two kinds of caller. A one-shot run is
+    usually unattended and its output is consumed as a result, so a memory
+    backend that never came up has to end the run rather than produce work
+    that silently had no memory behind it. An interactive session keeps
+    going without memory, because losing the whole agent over an unreachable
+    memory service is worse than working without recall -- but it says so at
+    ERROR level rather than filing it as a warning nobody reads.
+    """
+    if backend is None:
+        return
+    try:
+        await backend.start()
+    except Exception as e:
+        if fail_fast:
+            raise
+        logger.error(
+            "memory backend failed to start (%s); this session runs WITHOUT memory: "
+            "nothing will be recalled and nothing will be stored.",
+            e,
+        )
 
 
 def build_plugin_tools(

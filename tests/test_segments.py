@@ -38,7 +38,7 @@ class _Backend:
         self._mems = mems
         self.calls = []
 
-    async def recall(self, query, *, user_id=None, agent_id=None, top_k):
+    async def recall(self, query, *, user_id=None, agent_id=None, session_id=None, top_k):
         self.calls.append(
             {
                 "query": query,

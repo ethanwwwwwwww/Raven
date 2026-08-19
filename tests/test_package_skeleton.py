@@ -157,7 +157,7 @@ def test_config_safe_defaults():
     # Baseline memory/skill feature layer defaults ON: a
     # fresh install runs the everos memory backend, the SkillForgeRouter, and
     # empty-response recovery. Pinned so a future silent flip gets caught.
-    assert cfg.memory.backend == "everos"
+    assert cfg.memory.backend is None
     assert cfg.skill_forge.router.enabled is True
     assert cfg.base.agents.defaults.empty_recovery_enabled is True
     # Safe/cheap defaults can be ON.

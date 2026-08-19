@@ -264,7 +264,7 @@ def test_init_extension_defaults_seeds_safe_subset(cfg_path: Path) -> None:
     data = _read(cfg_path)
 
     assert data["memory"] == {
-        "backend": "everos",
+        "backend": None,
         "userId": "default",
         "agentId": "default",
         "memoryTopK": 5,

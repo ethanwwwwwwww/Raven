@@ -1116,23 +1116,28 @@ class MemoryConfig(_Base):
     agent-track recall (``backend.recall`` takes one XOR the other).
     EverOS routes each to its matching store; flat backends (mem0 /
     MemOS / Letta) use ``user_id`` and return empty for the agent call.
-    Each value must match the corresponding id the active backend
-    stamps on stored messages (e.g. ``plugins.config["everos-memory"]``
-    ``user_id`` / ``agent_id``) for stored memory to be retrievable.
+    Both are forwarded into the active plugin's config slice so the
+    recall side and the store side cannot drift onto different ids.
     """
 
-    backend: str | None = "everos"
-    """Activated backend contribution name. ``None`` disables the
-    plugin-driven memory path; AgentLoop continues with raven-core's
-    MemoryStore alone."""
+    backend: str | None = None
+    """Activated backend contribution name -- the single knob that turns
+    plugin-driven memory on and off. Off by default: a coding agent is
+    graded on one repository at a time, and recalled memory from earlier
+    tasks changes the prompt an evaluation believes it is measuring. Set
+    to ``"everos"`` to enable. ``None`` builds no backend at all, so no
+    EverOS home is seeded, no server is contacted and the ``# Memory``
+    segment stays empty."""
 
     user_id: str = "default"
     """Bare user identity passed as ``backend.recall(user_id=...)`` for
-    the user-track recall channel inside ``ContextAssembler.assemble``."""
+    the user-track recall channel inside ``ContextAssembler.assemble``,
+    and forwarded to the backend so stored messages carry the same id."""
 
     agent_id: str = "default"
     """Bare agent identity passed as ``backend.recall(agent_id=...)`` by
-    ``EverosSkillSource`` for agent-track skill recall."""
+    ``EverosSkillSource`` for agent-track skill recall, and forwarded to
+    the backend so stored cases carry the same id."""
 
     memory_top_k: int = 5
     """Top-K passed to ``backend.recall(user_id=user_id)`` per turn for

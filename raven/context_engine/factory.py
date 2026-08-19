@@ -98,12 +98,20 @@ def build_context_engine(
     if skill_forge_router_config is None:
         skill_forge_router_config = _SkillForgeRouterConfig()
 
-    router = _build_router(
-        builder=builder,
-        backend=backend,
-        memory_config=memory_config,
-        skill_forge_router_config=skill_forge_router_config,
-        skill_hub_client=skill_hub_client,
+    # Honour the router's master switch. It used to be declared and never
+    # read, so the Everos skill source attached whenever a memory backend
+    # existed -- turning memory on silently turned the agent-side skill
+    # track on with it.
+    router = (
+        _build_router(
+            builder=builder,
+            backend=backend,
+            memory_config=memory_config,
+            skill_forge_router_config=skill_forge_router_config,
+            skill_hub_client=skill_hub_client,
+        )
+        if skill_forge_router_config.enabled
+        else None
     )
 
     rewriter, gate = _build_rewriter_and_gate(

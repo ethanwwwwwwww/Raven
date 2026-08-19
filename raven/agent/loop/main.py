@@ -1255,10 +1255,11 @@ class AgentLoop:
         legacy callsites that never registered a plugin behave
         identically to pre-AG-1.
 
-        Exceptions raised by the backend are logged and swallowed —
-        the AgentLoop's main pipeline must never abort because the
-        plugin-side index failed; the turn is already saved to the
-        session log and the host's MEMORY.md compaction will still run.
+        Store failures propagate, as the MemoryBackend contract states.
+        The turn is already saved to the session log, but a run whose
+        writes all failed has no memory to recall next time while still
+        reporting success -- an unattended run has to end on that rather
+        than hand back work that silently had no memory behind it.
         """
         if self.backend is None:
             return
@@ -1268,9 +1269,10 @@ class AgentLoop:
             await self.backend.store(session_key, messages_slice)
         except Exception:
             logger.exception(
-                "backend.store failed for session {}; turn data preserved in session log, plugin-side indexing skipped",
+                "backend.store failed for session {}; turn data preserved in session log",
                 session_key,
             )
+            raise
 
     def _collect_injected_skill_ids(
         self,
