@@ -74,7 +74,7 @@ def gate_round_budget() -> int:
     return max(0, value)
 
 
-def gate_enabled(env_name: str, default: bool = True) -> bool:
+def gate_enabled(env_name: str, default: bool) -> bool:
     """Resolve a guardrail switch: explicit environment value, else ``default``.
 
     Opt-in switches produced a silent-no-op failure once already: a full run
@@ -84,6 +84,10 @@ def gate_enabled(env_name: str, default: bool = True) -> bool:
     where finishing a turn usually means answering rather than changing code.
     An explicit value overrides in either direction: "0", "false", "no", "off"
     or "disabled" turns a gate off, anything else turns it on.
+
+    Stating the default is mandatory: a gate added later as
+    ``gate_enabled(NEW_ENV)`` would silently arm itself on every line that
+    ships this helper, including the ones whose policy is opt-in.
     """
     raw = os.environ.get(env_name)
     if raw is None:
