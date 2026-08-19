@@ -13,7 +13,6 @@ private-name convention.
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from pathlib import Path
 
@@ -61,15 +60,6 @@ def make_provider(config: Config):
     from raven.providers.azure_openai_provider import AzureOpenAIProvider
     from raven.providers.base import GenerationSettings
     from raven.providers.openai_codex_provider import OpenAICodexProvider
-    from raven.replay import ENV_CASSETTE
-
-    # Ahead of the credential check on purpose: replaying a recorded cassette
-    # reaches no endpoint, so requiring a key would defeat the point.
-    cassette_path = os.environ.get(ENV_CASSETTE)
-    if cassette_path:
-        from raven.replay.provider import build_replay_provider
-
-        return build_replay_provider(cassette_path, config)
 
     check_provider_credentials(config)
 

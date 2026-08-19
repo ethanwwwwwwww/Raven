@@ -55,7 +55,6 @@ from raven.memory_engine.base import TokenBudget
 from raven.memory_engine.consolidate.consolidator import MemoryConsolidator, MemoryStore
 from raven.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from raven.providers.tool_args import ToolArgsLimits, coerce_arguments
-from raven.replay.tool_registry import tool_registry_for_env
 from raven.sandbox import SandboxConfig, SandboxExecutor, SandboxInitError, build_executor
 from raven.session.manager import Session, SessionManager
 from raven.spine.turn import Origin
@@ -626,10 +625,7 @@ class AgentLoop:
         # Used by eval harnesses (e.g. BCP) that need a strict tool subset.
         self._disabled_tools = set(disabled_tools or [])
         self._tool_search_config = tool_search_config
-        # Swapped at construction, not after: later lines capture
-        # ``self.tools.get_definitions`` as a deferred callable, so a
-        # replacement made further down would leave those bound to the old one.
-        self.tools = tool_registry_for_env()
+        self.tools = ToolRegistry()
 
         # Context engine — the single ContextAssembler.
         # Constructed here (after self.tools) so the factory can capture
@@ -2558,12 +2554,7 @@ class AgentLoop:
                     # changed. Positive evidence required: an unknown answer
                     # (no git, probe failure) must not restart the ritual on a
                     # turn that plausibly changed nothing.
-                    _replayed = getattr(self.tools, "workspace_dirty", None)
-                    _dirty = (
-                        _replayed
-                        if _replayed is not None
-                        else await completion_gates.workspace_has_changes(self.workspace)
-                    )
+                    _dirty = await completion_gates.workspace_has_changes(self.workspace)
                     test_gate_pending = _dirty is True
                 if test_gate_pending:
                     test_gate_nudges += 1
@@ -2652,23 +2643,12 @@ class AgentLoop:
                     stale_claim_nudged = True
                     gate_rounds_used += 1
                     gate_triggers["stale_claim"] = gate_triggers.get("stale_claim", 0) + 1
-                    logger.info(
-                        "stale-claim gate: finish text declares failing tests stale without baseline evidence"
-                    )
+                    logger.info("stale-claim gate: finish text declares failing tests stale without baseline evidence")
                     messages.append({"role": "user", "content": self._STALE_CLAIM_NUDGE})
                     prev_had_tool_calls = False
                     continue
-                # Under replay the tools write nothing, so asking git would
-                # always answer "clean" and the gate would refuse to let a
-                # recorded trajectory finish. The replay registry tracks what the
-                # recording actually wrote and answers in git's place.
-                replayed_dirty = getattr(self.tools, "workspace_dirty", None)
                 workspace_dirty = (
-                    (
-                        replayed_dirty
-                        if replayed_dirty is not None
-                        else await completion_gates.workspace_has_changes(self.workspace)
-                    )
+                    await completion_gates.workspace_has_changes(self.workspace)
                     if empty_diff_gate_enabled and not empty_diff_nudged and gate_rounds_used < max_gate_rounds
                     else None
                 )
