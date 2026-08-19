@@ -48,6 +48,8 @@ dependencies = [
     # working if upstream ever drops it.
     "numpy>=2.0,<3.0",
     "sqlglot>=25.0.0",
+    "ripgrep-bin>=15.2.0",
+    "jedi>=0.19",
 ]
 
 [project.optional-dependencies]

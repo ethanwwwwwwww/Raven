@@ -97,16 +97,21 @@ Understand
 Implement
 - Make the smallest change per fix site that fully fixes the root cause. No
   speculative fallbacks, no compatibility shims, no extra features nobody asked
-  for.
+  for. A regression you yourself introduced and observed is always in scope:
+  remove it by narrowing or reworking the patch, not by stacking new code on
+  top. Pre-existing problems you did not cause are not - report those instead.
 - When editing an existing function, keep its signature and return type unless
   the task explicitly asks to change them (additions that break no existing
   call, like a new optional parameter, are fine). Callers and tests consume
   that interface: a better algorithm behind a changed return type still breaks
   every one of them.
 - Fix ALL occurrences of the same flaw (sibling functions, parallel branches,
-  other call sites): possibly many sites, each getting the same minimal fix.
-- Cover the input variants, modes, and boundary values of the behavior the
-  requirement describes - and nothing beyond that behavior.
+  other call sites), each getting the same minimal fix. Enumerate the sites
+  BEFORE fixing: grep for the name across code, strings, comments, and config.
+- Cover every input form the property stated by the requirement implies - a
+  property like "parsing is case-insensitive" covers inputs it never listed as
+  examples; enumerate by the property, not by its examples - and nothing
+  beyond that property.
 
 Verify
 - Discover how THIS project runs its own tests (test configs, CI files, scripts,
@@ -116,11 +121,20 @@ Verify
   conventions and run it through a real test runner. A quick check you wrote
   yourself is the weakest evidence - it re-encodes the same assumptions as
   your change - so weigh carefully what your evidence actually proves before
-  claiming done, and say what it was.
+  claiming done, and say what it was. The ranking grades proof of success
+  only, never permission to dismiss a failure: a failure surfaced by even your
+  weakest check is real. Fix it if it is yours or in scope; otherwise report
+  it when finishing (calling a test stale, citing the task requirement it
+  contradicts, is a valid report).
 - A test that passed before your change and fails after it is a regression YOU
   introduced: narrow or rework your patch. The only exception is a test that
   asserts the exact old behavior the task explicitly asks to change (see
   Understand) - and that exception never excuses collateral breakage elsewhere.
+- Acceptance evidence must exercise the real capability the task concerns (the
+  real backend / filesystem / runner: faking a capability the environment has
+  proves nothing), with expected values from the task statement or existing
+  tests, never from your own implementation. Mocks inside unit tests, per
+  project conventions, stay normal engineering - this binds final acceptance.
 - Building from scratch (no existing project or tests): derive verification
   from the task statement itself - check every boundary, format, file path,
   and quantity it names, one by one, against your actual output. That literal
@@ -268,7 +282,11 @@ def _interaction_policy_substitutions() -> dict[str, str]:
     }
 
 
-def identity_text(workspace: Path, model: str | None = None) -> str:
+def identity_text(
+    workspace: Path,
+    model: str | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+) -> str:
     """Segment 1 — the core identity / runtime block, from the model's prompt file.
 
     ``model`` selects a per-family prompt variant and the run profile's domain
@@ -296,7 +314,7 @@ def identity_text(workspace: Path, model: str | None = None) -> str:
         "{{WORKSPACE}}": str(workspace.expanduser().resolve()),
         "{{PLATFORM}}": f"{system.lower()} {platform.machine()}",
         "{{PYTHON}}": platform.python_version(),
-        "{{TODAY}}": datetime.now().strftime("%a %b %d %Y"),
+        "{{TODAY}}": (now_fn or datetime.now)().strftime("%a %b %d %Y"),
         "{{SE_DISCIPLINE}}": _se_discipline_text(),
         # Both discipline sentinels are always substituted; each prompt file
         # carries only the one for its domain, so the other is a no-op. This

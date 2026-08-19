@@ -23,9 +23,12 @@ def test_unset_follows_the_call_site_default(monkeypatch):
     assert cg.gate_enabled(SWITCH, default=False) is False
 
 
-def test_default_is_on_when_the_call_site_says_nothing(monkeypatch):
+def test_the_call_site_must_state_its_default(monkeypatch):
+    # An implicit default would arm a newly added gate on every line shipping
+    # this helper, including the ones whose policy is opt-in.
     monkeypatch.delenv(SWITCH, raising=False)
-    assert cg.gate_enabled(SWITCH) is True
+    with pytest.raises(TypeError):
+        cg.gate_enabled(SWITCH)
 
 
 @pytest.mark.parametrize("raw", ["1", "true", "yes", "on", "anything"])
