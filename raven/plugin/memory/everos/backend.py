@@ -27,6 +27,7 @@ Three architectural invariants worth re-stating:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from types import SimpleNamespace
 from typing import Any, Literal, Protocol
@@ -35,6 +36,7 @@ import httpx
 
 from raven.memory_engine import Memory
 from raven.plugin import PluginContext
+from raven.plugin.memory.everos.scope import DEFAULT_APP_ID, Scope, resolve_scope
 
 logger = logging.getLogger("raven.plugin.memory.everos")
 
@@ -59,6 +61,11 @@ class _Adapter(Protocol):
     - :class:`_HttpEverosAdapter` — HTTP client over EverOS's REST API.
     - :class:`_NoOpAdapter` — returns ``None`` / swallows writes.
       Used by tests that don't care about everos.
+
+    The EverOS storage scope is deliberately absent from these
+    signatures. It belongs to the adapter, not to a call: passing it
+    per-call is what let a write address one bucket while the matching
+    read addressed another.
     """
 
     async def search(
@@ -68,6 +75,7 @@ class _Adapter(Protocol):
         agent_id: str | None,
         query: str,
         top_k: int,
+        session_id: str | None = None,
     ) -> Any: ...
 
     async def memorize(
@@ -76,8 +84,6 @@ class _Adapter(Protocol):
         payload_messages: list[dict[str, Any]],
         *,
         is_final: bool = False,
-        app_id: str | None = None,
-        project_id: str | None = None,
     ) -> None: ...
 
 
@@ -87,6 +93,7 @@ class _NoOpAdapter:
 
     async def search(self, **kw: Any) -> Any:
         return None
+
 
     async def memorize(self, *a: Any, **kw: Any) -> None:
         return None
@@ -115,20 +122,32 @@ def _jsonify(obj: Any) -> Any:
     return obj
 
 
+# The bundled everos (1.1.3) mounts its memory routes under /api/v1 only; the
+# hosted service mounts /api/v2 only. Default to the server raven can start
+# itself so the out-of-box path keeps working.
+DEFAULT_API_VERSION = "v1"
+SUPPORTED_API_VERSIONS = ("v1", "v2")
+
 _DEFAULT_HTTP_TIMEOUT_S: float = 60.0
 _MEMORIZE_TIMEOUT_S: float = 360.0
 
 
 class _HttpEverosAdapter:
-    """Adapter that talks to a remote EverOS service over HTTP.
+    """Adapter that talks to an EverOS service over HTTP.
 
-    Endpoints (per the EverOS v1 API brief, see
-    ``everos/entrypoints/api/routes/{search,memorize}.py``):
+    Endpoints, under a configurable API version prefix:
 
-    - ``POST /api/v1/memory/search`` — request body ``SearchRequest``,
+    - ``POST /api/<ver>/memory/search`` — request body ``SearchRequest``,
       response ``{request_id, data: SearchData}``.
-    - ``POST /api/v1/memory/add`` — request body ``MemorizeAddRequest``,
+    - ``POST /api/<ver>/memory/add`` — request body ``MemorizeAddRequest``,
       response ``{request_id, data: AddResponseData}``.
+    - ``POST /api/<ver>/memory/flush`` — force extraction for a session.
+
+    The version is a knob because the two deployments raven talks to do
+    not overlap: the bundled server (everos 1.1.3, which raven can start
+    itself) serves only ``v1``, and the hosted service serves only
+    ``v2``. Guessing would turn a version mismatch into a 404 mid-turn,
+    so it is declared -- and a 404 says which knob to change.
 
     The adapter constructs an :class:`httpx.AsyncClient` per-instance by
     default; tests inject a pre-built client (typically with
@@ -141,12 +160,21 @@ class _HttpEverosAdapter:
         self,
         base_url: str,
         *,
+        scope: Scope | None = None,
         api_key: str | None = None,
+        api_version: str = DEFAULT_API_VERSION,
         timeout_s: float = _DEFAULT_HTTP_TIMEOUT_S,
         client: httpx.AsyncClient | None = None,
     ) -> None:
+        if api_version not in SUPPORTED_API_VERSIONS:
+            raise ValueError(
+                f"unsupported EverOS api_version {api_version!r}; "
+                f"expected one of {sorted(SUPPORTED_API_VERSIONS)}"
+            )
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
+        self._api_version = api_version
+        self._scope = scope or Scope(app_id=DEFAULT_APP_ID, project_id="default")
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(
             timeout=httpx.Timeout(timeout_s),
@@ -162,6 +190,29 @@ class _HttpEverosAdapter:
             return {"Authorization": f"Bearer {self._api_key}"}
         return {}
 
+    def _url(self, endpoint: str) -> str:
+        return f"{self._base_url}/api/{self._api_version}/memory/{endpoint}"
+
+    def _raise_for_status(self, r: httpx.Response, endpoint: str) -> None:
+        if r.status_code == 404:
+            raise RuntimeError(
+                f"EverOS at {self._base_url} has no {self._api_version} "
+                f"memory/{endpoint} endpoint. The bundled server serves v1 and "
+                f"the hosted service serves v2 -- set the everos-memory plugin's "
+                f"'api_version' to match this deployment."
+            )
+        r.raise_for_status()
+
+    def _scoped(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Stamp the storage scope onto an outbound request body.
+
+        Every request this adapter sends goes through here, which is what
+        makes reads and writes address the same bucket by construction.
+        """
+        body["app_id"] = self._scope.app_id
+        body["project_id"] = self._scope.project_id
+        return body
+
     async def search(
         self,
         *,
@@ -169,16 +220,24 @@ class _HttpEverosAdapter:
         agent_id: str | None,
         query: str,
         top_k: int,
+        session_id: str | None = None,
     ) -> Any:
-        # Wire contract is user_id XOR agent_id (everos v1 search route).
+        # Wire contract is user_id XOR agent_id (everos search route).
         body: dict[str, Any] = {"query": query, "top_k": top_k}
         if user_id is not None:
             body["user_id"] = user_id
         if agent_id is not None:
             body["agent_id"] = agent_id
-        url = f"{self._base_url}/api/v1/memory/search"
-        r = await self._client.post(url, json=body, headers=self._headers())
-        r.raise_for_status()
+        if session_id is not None:
+            # A top-level equality scalar, not wrapped in AND/OR or {"eq": ...}:
+            # that is the only shape that also returns the not-yet-extracted
+            # tail, which matters because extraction lags a turn by far longer
+            # than a coding task takes.
+            body["filters"] = {"session_id": session_id}
+        r = await self._client.post(
+            self._url("search"), json=self._scoped(body), headers=self._headers()
+        )
+        self._raise_for_status(r, "search")
         payload = r.json() or {}
         # Server returns ``{request_id, data: {episodes, profiles, ...}}``.
         # The backend's converter only needs ``data`` — extract + jsonify.
@@ -191,34 +250,25 @@ class _HttpEverosAdapter:
         payload_messages: list[dict[str, Any]],
         *,
         is_final: bool = False,
-        app_id: str | None = None,
-        project_id: str | None = None,
     ) -> None:
-        body: dict[str, Any] = {
-            "session_id": session_id,
-            "messages": payload_messages,
-        }
-        if app_id is not None:
-            body["app_id"] = app_id
-        if project_id is not None:
-            body["project_id"] = project_id
-        url = f"{self._base_url}/api/v1/memory/add"
-        r = await self._client.post(url, json=body, headers=self._headers(), timeout=_MEMORIZE_TIMEOUT_S)
-        r.raise_for_status()
+        body: dict[str, Any] = self._scoped(
+            {
+                "session_id": session_id,
+                "messages": payload_messages,
+            }
+        )
+        r = await self._client.post(
+            self._url("add"), json=body, headers=self._headers(), timeout=_MEMORIZE_TIMEOUT_S
+        )
+        self._raise_for_status(r, "add")
         if is_final:
-            flush_body: dict[str, Any] = {"session_id": session_id}
-            if app_id is not None:
-                flush_body["app_id"] = app_id
-            if project_id is not None:
-                flush_body["project_id"] = project_id
-            flush_url = f"{self._base_url}/api/v1/memory/flush"
             fr = await self._client.post(
-                flush_url,
-                json=flush_body,
+                self._url("flush"),
+                json=self._scoped({"session_id": session_id}),
                 headers=self._headers(),
                 timeout=_MEMORIZE_TIMEOUT_S,
             )
-            fr.raise_for_status()
+            self._raise_for_status(fr, "flush")
 
 
 # ---------------------------------------------------------------------------
@@ -243,8 +293,20 @@ class EverosBackend:
         self._flush_every_turns: int = int(
             self._config.get("flush_every_turns", 1),
         )
+        # One coding task is one session, so a task recalling a sibling task's
+        # memory is contamination, not context. Set false for an assistant that
+        # should carry memory across conversations.
+        self._scope_recall_to_session: bool = bool(
+            self._config.get("scope_recall_to_session", True),
+        )
         self._turn_counts: dict[str, int] = {}
         self._feedback_noop_logged = False
+        # Resolved once here so both the store path and the recall path read
+        # the same pair; there is no per-call override.
+        self._scope = resolve_scope(
+            getattr(self._services, "workspace", None),
+            self._config,
+        )
 
         if adapter is not None:
             self._adapter: _Adapter | None = adapter
@@ -258,13 +320,15 @@ class EverosBackend:
         ``ctx.config`` with documented defaults.
         """
         base_url = self._config.get("base_url") or "http://localhost:18791"
-        api_key = self._config.get("api_key")
+        api_key = self._config.get("api_key") or os.environ.get("EVEROS_API_KEY") or None
         timeout_s = float(
             self._config.get("timeout_s", _DEFAULT_HTTP_TIMEOUT_S),
         )
         return _HttpEverosAdapter(
             base_url,
+            scope=self._scope,
             api_key=api_key,
+            api_version=str(self._config.get("api_version") or DEFAULT_API_VERSION),
             timeout_s=timeout_s,
         )
 
@@ -289,17 +353,37 @@ class EverosBackend:
                 self._adapter = _NoOpAdapter()
                 return
 
-            from raven.plugin.memory.everos._server import ensure_everos_server
+            from raven.plugin.memory.everos._server import (
+                ensure_everos_server,
+                probe_everos_server,
+            )
 
-            base_url = self._config.get("base_url") or "http://localhost:18791"
+            # A configured base_url names somebody else's service. Spawning a
+            # local server on that port answers a different address than the
+            # one we were told to use, so an unreachable remote is an error.
+            configured_url = self._config.get("base_url")
+            base_url = configured_url or "http://localhost:18791"
             try:
-                await ensure_everos_server(base_url)
+                if configured_url:
+                    await probe_everos_server(base_url)
+                else:
+                    await ensure_everos_server(base_url)
             except Exception as e:
                 self._logger.error(
-                    "EverosBackend: failed to start EverOS server (%s)",
+                    "EverosBackend: EverOS at %s is unavailable (%s)",
+                    base_url,
                     e,
                 )
                 raise
+            self._logger.info(
+                "EverosBackend ready: mode=%s base_url=%s root=%s app_id=%s project_id=%s flush_every_turns=%s",
+                "remote" if configured_url else "local",
+                base_url,
+                os.environ.get("EVEROS_ROOT"),
+                self._scope.app_id,
+                self._scope.project_id,
+                self._flush_every_turns,
+            )
 
     async def stop(self) -> None:
         self._logger.info("EverosBackend.stop")
@@ -321,6 +405,7 @@ class EverosBackend:
         *,
         user_id: str | None = None,
         agent_id: str | None = None,
+        session_id: str | None = None,
         top_k: int,
     ) -> list[Memory]:
         """Semantic recall via EverOS, scoped to one track.
@@ -329,8 +414,10 @@ class EverosBackend:
         ``agent_id`` set → everos ``agent_id`` → cases + skills.
         Exactly one must be set (XOR); neither or both → warn + empty.
 
-        Adapter exceptions are caught and logged so a transient EverOS
-        failure doesn't cascade into the AgentLoop turn pipeline.
+        Transport failures propagate, as the MemoryBackend contract
+        states. Swallowing them made an unreachable EverOS look exactly
+        like a store with nothing relevant in it, so a run could believe
+        memory was working while recalling nothing all session.
         """
         if (user_id is None) == (agent_id is None):
             self._logger.warning(
@@ -343,19 +430,13 @@ class EverosBackend:
         owner_type: _OwnerType = "user" if user_id is not None else "agent"
         if self._adapter is None:
             return []  # adapter still building (start() not finished); degrade to no hits
-        try:
-            data = await self._adapter.search(
-                user_id=user_id,
-                agent_id=agent_id,
-                query=query,
-                top_k=top_k,
-            )
-        except Exception as e:
-            self._logger.warning(
-                "EverosBackend.recall failed (%s); returning empty",
-                e,
-            )
-            return []
+        data = await self._adapter.search(
+            user_id=user_id,
+            agent_id=agent_id,
+            query=query,
+            top_k=top_k,
+            session_id=session_id if self._scope_recall_to_session else None,
+        )
         if data is None:
             return []
         return self._search_data_to_memories(data, owner_type)
@@ -391,6 +472,13 @@ class EverosBackend:
             return
         if self._adapter is None:
             return
+        if metadata:
+            stray = {"app_id", "project_id"} & set(metadata)
+            if stray:
+                raise ValueError(
+                    f"store() does not accept a per-call storage scope (got {sorted(stray)}); "
+                    "the scope belongs to the backend so reads and writes cannot diverge"
+                )
         if metadata and "is_final" in metadata:
             is_final = bool(metadata["is_final"])
         else:
@@ -402,8 +490,6 @@ class EverosBackend:
             session_id,
             payload,
             is_final=is_final,
-            app_id=metadata.get("app_id") if metadata else None,
-            project_id=metadata.get("project_id") if metadata else None,
         )
 
     async def feedback(self, signals: dict[str, Any]) -> None:

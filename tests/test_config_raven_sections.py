@@ -34,7 +34,7 @@ class TestDefaults:
 
     def test_memory_defaults(self) -> None:
         c = MemoryConfig()
-        assert c.backend == "everos"
+        assert c.backend is None  # off by default: memory changes the graded prompt
         assert c.user_id == "default"
         assert c.agent_id == "default"
         assert c.memory_top_k == 5
@@ -192,7 +192,7 @@ class TestLoaderIntegration:
         cfg = load_raven_config(path)
         # All three default-construct without raising.
         assert cfg.plugins.disabled == []
-        assert cfg.memory.backend == "everos"
+        assert cfg.memory.backend is None
         assert cfg.skill_forge.router.enabled is True
 
     def test_explicit_null_section_uses_defaults(
