@@ -27,7 +27,11 @@ import sys
 from pathlib import Path
 
 _DEFAULT_PROMPT_GLOBS = (
-    "raven/plugin/data_agent/methodology.md",
+    # The data-domain discipline block, injected into every data-domain
+    # identity prompt (see context_engine/segments/render.py). It moved out of
+    # the plugin so the renderer need not import one; the audit follows it.
+    "raven/context_engine/segments/prompts/data/methodology.md",
+    "raven/context_engine/segments/prompts/data/*.txt",
     "raven/plugin/data_agent/*.py",
 )
 

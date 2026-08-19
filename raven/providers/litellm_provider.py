@@ -496,7 +496,7 @@ class LiteLLMProvider(LLMProvider):
 
         # Pass provider-specific body extras (e.g. OpenRouter routing pin)
         if self.extra_body:
-            kwargs["extra_body"] = self.extra_body
+            _merge_extra_body(kwargs, self.extra_body)
 
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
@@ -556,7 +556,7 @@ class LiteLLMProvider(LLMProvider):
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
         if self.extra_body:
-            kwargs["extra_body"] = self.extra_body
+            _merge_extra_body(kwargs, self.extra_body)
         try:
             await asyncio.wait_for(acompletion(**kwargs), self.generation.probe_timeout)
             return True
@@ -623,7 +623,7 @@ class LiteLLMProvider(LLMProvider):
         if self.extra_headers:
             kwargs["extra_headers"] = self.extra_headers
         if self.extra_body:
-            kwargs["extra_body"] = self.extra_body
+            _merge_extra_body(kwargs, self.extra_body)
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
             kwargs["drop_params"] = True

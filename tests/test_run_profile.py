@@ -8,6 +8,7 @@ byte-for-byte with the pre-sentinel files for every attended profile.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from raven.agent import profile as run_profile
 from raven.agent.profile import (
     ACCEPTANCE_ENV,
     DELIVERY_ENV,
+    DOMAIN_ENV,
     PROFILE_ENV,
     PROFILES,
     RunProfile,
@@ -26,7 +28,7 @@ from raven.agent.profile import (
 
 @pytest.fixture(autouse=True)
 def clean_profile_state(monkeypatch: pytest.MonkeyPatch):
-    for env in (PROFILE_ENV, DELIVERY_ENV, ACCEPTANCE_ENV):
+    for env in (PROFILE_ENV, DELIVERY_ENV, ACCEPTANCE_ENV, DOMAIN_ENV):
         monkeypatch.delenv(env, raising=False)
     monkeypatch.setattr(run_profile, "_current", None)
     yield
@@ -221,3 +223,56 @@ def test_run_profile_is_frozen() -> None:
     with pytest.raises(Exception):
         PROFILES["interactive"].delivery = "commit"  # type: ignore[misc]
     assert isinstance(PROFILES["interactive"], RunProfile)
+
+
+# ---- domain axis ---------------------------------------------------------------
+
+
+def test_domain_defaults_to_coding_for_every_preset() -> None:
+    """The fork is a coding agent; a data run has to say so explicitly."""
+    for preset in PROFILES.values():
+        assert preset.domain == "coding", preset.name
+
+
+def test_domain_env_overrides_any_preset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(PROFILE_ENV, "eval_answer")
+    monkeypatch.setenv(DOMAIN_ENV, "data")
+    assert resolve_profile().domain == "data"
+    # Domain is orthogonal: it does not move any other field.
+    assert resolve_profile().name == "eval_answer"
+    assert resolve_profile().acceptance == "conversation"
+
+
+def test_unknown_domain_warns_and_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(DOMAIN_ENV, "astrology")
+    assert resolve_profile().domain == "coding"
+
+
+def test_domain_appears_in_the_audit_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(DOMAIN_ENV, "data")
+    assert "domain=data" in describe_effective(resolve_profile())
+
+
+# ---- deadline margins ----------------------------------------------------------
+
+
+def test_attended_profiles_never_hard_stop() -> None:
+    """Ending the turn from under someone typing into it is never right."""
+    for name in ("interactive", "oneshot", "legacy_oneshot"):
+        assert PROFILES[name].deadline_hard_stop_sec is None, name
+
+
+def test_eval_profiles_carry_a_hard_stop() -> None:
+    assert PROFILES["eval_coding"].deadline_hard_stop_sec == 90.0
+    assert PROFILES["eval_answer"].deadline_hard_stop_sec == 60.0
+
+
+def test_coding_wrapup_is_longer_than_answer_wrapup() -> None:
+    """Wrapping up costs what delivery costs: a suite run and a commit."""
+    assert PROFILES["eval_coding"].deadline_wrapup_sec > PROFILES["eval_answer"].deadline_wrapup_sec
+
+
+def test_derive_strips_a_hard_stop_from_an_attended_profile() -> None:
+    """A future preset cannot get the attended invariant wrong."""
+    bad = replace(PROFILES["eval_coding"], attended=True)
+    assert run_profile._derive(bad).deadline_hard_stop_sec is None

@@ -17,6 +17,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from loguru import logger
+
 from raven.context_engine.segments import identity_prompts
 from raven.security.trust import wrap_untrusted
 from raven.utils.helpers import detect_image_mime
@@ -184,6 +186,25 @@ def _se_discipline_text() -> str:
     return _SE_DISCIPLINE
 
 
+# The data-domain counterpart of _SE_DISCIPLINE, kept as a file rather than a
+# string literal because it is an audited artifact: DataAgentBench's
+# prompt_contamination_check reads it to prove nothing dataset-specific was ever
+# injected up front. It lives under prompts/ rather than in the data-agent
+# plugin because the identity renderer must not import a plugin, and because the
+# plugin ships enabled_by_default=false -- a domain's discipline cannot depend on
+# whether an optional plugin happens to be installed.
+_DATA_DISCIPLINE_PATH = Path(__file__).parent / "prompts" / "data" / "methodology.md"
+
+
+def _data_discipline_text() -> str:
+    try:
+        return _DATA_DISCIPLINE_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        # Same rule as a missing prompt file: degrade, never break a run.
+        logger.warning("data discipline block missing at {}", _DATA_DISCIPLINE_PATH)
+        return ""
+
+
 # Mode-sensitive identity clauses, split out of the prompt files behind
 # {{...}} sentinels. The attended texts are byte-for-byte what the files
 # carried inline before the split (tests pin this), so every profile that
@@ -250,8 +271,9 @@ def _interaction_policy_substitutions() -> dict[str, str]:
 def identity_text(workspace: Path, model: str | None = None) -> str:
     """Segment 1 — the core identity / runtime block, from the model's prompt file.
 
-    ``model`` selects a per-family prompt variant and falls back to the shared
-    default; see :mod:`raven.context_engine.segments.identity_prompts`.
+    ``model`` selects a per-family prompt variant and the run profile's domain
+    selects the directory it is read from, both falling back to the shared
+    coding default; see :mod:`raven.context_engine.segments.identity_prompts`.
 
     ``default.txt`` follows opencode's default system prompt (the one it serves
     to non-GPT/Gemini/Claude models) with everything tool-specific rewritten for
@@ -262,7 +284,12 @@ def identity_text(workspace: Path, model: str | None = None) -> str:
     literal braces (code snippets, ``{skill-name}`` paths), which ``format``
     would try to interpret.
     """
-    _, template = identity_prompts.load_template(model)
+    from raven.agent.profile import current_profile
+
+    domain = current_profile().domain
+    served_domain, _family, template = identity_prompts.load_template(model, domain)
+    if served_domain != domain:
+        logger.warning("no identity prompt for domain {!r}; served {!r}", domain, served_domain)
     system = platform.system()
     substitutions = {
         "{{LANGUAGE_DIRECTIVE}}": _language_directive(),
@@ -271,6 +298,11 @@ def identity_text(workspace: Path, model: str | None = None) -> str:
         "{{PYTHON}}": platform.python_version(),
         "{{TODAY}}": datetime.now().strftime("%a %b %d %Y"),
         "{{SE_DISCIPLINE}}": _se_discipline_text(),
+        # Both discipline sentinels are always substituted; each prompt file
+        # carries only the one for its domain, so the other is a no-op. This
+        # keeps the coding files untouched and avoids a sentinel whose name
+        # stops matching what it renders.
+        "{{DATA_DISCIPLINE}}": _data_discipline_text(),
         "{{PLATFORM_POLICY}}": _platform_policy(),
         **_interaction_policy_substitutions(),
     }
@@ -284,7 +316,16 @@ def load_bootstrap_files(workspace: Path, bootstrap_files: list[str] | None = No
 
     Read-only and size-capped: raven never writes these, and a repository can
     carry an arbitrarily large markdown at these names.
+
+    Only for the coding domain: these files state how to build and test *this
+    repository*, which is not what a data workspace holds. Injecting them into a
+    data run is at best noise and at worst a coding checklist the grader never
+    looks at, so the domain decides rather than "the file happened to be there".
     """
+    from raven.agent.profile import current_profile
+
+    if current_profile().domain != "coding":
+        return ""
     parts: list[str] = []
     for filename in bootstrap_files or BOOTSTRAP_FILES:
         file_path = workspace / filename

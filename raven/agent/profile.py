@@ -38,9 +38,18 @@ from loguru import logger
 PROFILE_ENV = "RAVEN_PROFILE"
 DELIVERY_ENV = "RAVEN_DELIVERY"
 ACCEPTANCE_ENV = "RAVEN_ACCEPTANCE"
+DOMAIN_ENV = "RAVEN_DOMAIN"
 
 DELIVERIES = ("none", "live_env", "worktree_diff", "commit")
 ACCEPTANCES = ("conversation", "existing_tests", "spec")
+# Subject-matter domain of the task, selecting the identity prompt directory and
+# the discipline block inside it. Deliberately NOT derived from the preset: one
+# preset serves several domains (eval_answer runs pinchbench, clawbench,
+# appworld and DataAgentBench, of which only the last is a data task), so the
+# harness states the domain separately. Values match the prompt directory names
+# under context_engine/segments/prompts/ so there is no mapping table to keep
+# in sync.
+DOMAINS = ("coding", "data")
 
 
 @dataclass(frozen=True)
@@ -66,6 +75,14 @@ class RunProfile:
     deadline_checkpoint: bool
     shadow_checkpoint: bool
     ask_user_enabled: bool
+    domain: str = "coding"
+    # Absolute-seconds margins handed to TimeBudgetReminder. Wrapping up costs
+    # what delivery costs: a coding task has to run the suite and commit, an
+    # answer task only has to write the answer. hard_stop=None disables the
+    # stop entirely, which is the only correct setting for an attended run --
+    # ending the turn from under the person typing into it is never right.
+    deadline_wrapup_sec: float = 420.0
+    deadline_hard_stop_sec: float | None = 60.0
 
 
 _GATES_OFF = GateDefaults(
@@ -96,6 +113,8 @@ PROFILES: dict[str, RunProfile] = {
         deadline_checkpoint=False,
         shadow_checkpoint=True,
         ask_user_enabled=True,
+        deadline_wrapup_sec=420.0,
+        deadline_hard_stop_sec=None,
     ),
     # The intended shape of an attended one-shot (`-m` quick question):
     # quieter than legacy_oneshot. Nothing maps here implicitly yet — turning
@@ -110,6 +129,8 @@ PROFILES: dict[str, RunProfile] = {
         deadline_checkpoint=False,
         shadow_checkpoint=False,
         ask_user_enabled=True,
+        deadline_wrapup_sec=420.0,
+        deadline_hard_stop_sec=None,
     ),
     # Inference-only compatibility snapshot: exactly what `-m` (and any
     # third-party caller passing interactive=False) gets today. Not accepted
@@ -124,6 +145,8 @@ PROFILES: dict[str, RunProfile] = {
         deadline_checkpoint=False,
         shadow_checkpoint=False,
         ask_user_enabled=True,
+        deadline_wrapup_sec=420.0,
+        deadline_hard_stop_sec=None,
     ),
     "eval_coding": RunProfile(
         name="eval_coding",
@@ -135,6 +158,8 @@ PROFILES: dict[str, RunProfile] = {
         deadline_checkpoint=False,
         shadow_checkpoint=False,
         ask_user_enabled=False,
+        deadline_wrapup_sec=600.0,
+        deadline_hard_stop_sec=90.0,
     ),
     "eval_answer": RunProfile(
         name="eval_answer",
@@ -146,6 +171,8 @@ PROFILES: dict[str, RunProfile] = {
         deadline_checkpoint=False,
         shadow_checkpoint=False,
         ask_user_enabled=False,
+        deadline_wrapup_sec=420.0,
+        deadline_hard_stop_sec=60.0,
     ),
 }
 
@@ -172,13 +199,20 @@ def _derive(profile: RunProfile) -> RunProfile:
     acceptance="spec" selects the statement-audit verify wording (when the
     verify gate is on at all); delivery="commit" turns the deadline
     checkpoint ask on — uncommitted work is exactly the work a commit-graded
-    deadline destroys.
+    deadline destroys. An attended run never hard-stops, whatever its preset
+    says: enforcing that here means a new preset cannot get it wrong.
     """
     gates = profile.gates
     if profile.acceptance == "spec" and gates.verify_complete:
         gates = replace(gates, verify_wording="spec")
     deadline_checkpoint = profile.deadline_checkpoint or profile.delivery == "commit"
-    return replace(profile, gates=gates, deadline_checkpoint=deadline_checkpoint)
+    hard_stop = None if profile.attended else profile.deadline_hard_stop_sec
+    return replace(
+        profile,
+        gates=gates,
+        deadline_checkpoint=deadline_checkpoint,
+        deadline_hard_stop_sec=hard_stop,
+    )
 
 
 def resolve_profile(
@@ -214,6 +248,8 @@ def resolve_profile(
         base = replace(base, delivery=delivery)
     if acceptance := _valid_or_warn(os.environ.get(ACCEPTANCE_ENV), ACCEPTANCES, "acceptance"):
         base = replace(base, acceptance=acceptance)
+    if domain := _valid_or_warn(os.environ.get(DOMAIN_ENV), DOMAINS, "domain"):
+        base = replace(base, domain=domain)
     return _derive(replace(base, source=source))
 
 
@@ -243,6 +279,7 @@ def describe_effective(profile: RunProfile) -> str:
     return (
         f"raven-profile: v1 name={profile.name} source={profile.source} "
         f"delivery={profile.delivery} acceptance={profile.acceptance} "
+        f"domain={profile.domain} "
         f"gates=test_evidence:{onoff(test_evidence)},"
         f"verify:{wording if verify else 'off'},"
         f"stale:{onoff(stale)},red:{onoff(red)},empty_diff:{onoff(empty)} "
