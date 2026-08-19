@@ -290,8 +290,15 @@ class EverosBackend:
         self._logger = ctx.logger
         self._agent_id: str = self._config.get("agent_id") or _DEFAULT_AGENT_ID
         self._user_id: str = self._config.get("user_id") or _DEFAULT_USER_ID
+        # Default 0: no client-driven flush. Measured against the hosted
+        # service, a flush issued right after add finds the buffer still
+        # empty (ingestion is async) and extracts nothing -- extraction is
+        # the server scheduler's job. Same-session recall does not depend
+        # on it either: a session-filtered search already returns the
+        # unextracted buffer tail. Set N>0 to force a flush every N turns
+        # (extraction then lags at least one turn).
         self._flush_every_turns: int = int(
-            self._config.get("flush_every_turns", 1),
+            self._config.get("flush_every_turns", 0),
         )
         # One coding task is one session, so a task recalling a sibling task's
         # memory is contamination, not context. Set false for an assistant that
