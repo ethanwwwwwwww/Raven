@@ -166,6 +166,19 @@ def register(app: typer.Typer) -> None:
         resume: str | None = typer.Option(None, "--resume", "-r", help="Resume session by bare id or unique prefix"),
         workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
         config: str | None = typer.Option(None, "--config", help="Config file path"),
+        profile: str | None = typer.Option(
+            None,
+            "--profile",
+            help=(
+                "Run profile: interactive, oneshot, eval_coding or eval_answer. "
+                "Default infers from the invocation (REPL vs -m)."
+            ),
+        ),
+        domain: str | None = typer.Option(
+            None,
+            "--domain",
+            help="Task domain: coding (default) or data. Selects the identity prompt.",
+        ),
         markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render assistant output as Markdown"),
         logs: bool = typer.Option(False, "--logs/--no-logs", help="Show Raven runtime logs during chat"),
         wait_skill_extract: bool = typer.Option(
@@ -227,6 +240,7 @@ def register(app: typer.Typer) -> None:
 
         from raven.agent.loop import AgentLoop
         from raven.agent.loop.recovery import limits_from_defaults
+        from raven.agent.profile import resolve_profile
         from raven.cli._proactive_stack import (
             attach_sentinel_decision_consumer,
             attach_sentinel_spawn,
@@ -310,6 +324,7 @@ def register(app: typer.Typer) -> None:
             config.workspace_path,
             ec_config,
             registry=plugin_registry,
+            provider=provider,
         )
 
         agent_loop = AgentLoop(
@@ -345,7 +360,14 @@ def register(app: typer.Typer) -> None:
             # ``-m "..."`` is a one-shot — no next turn for recovery
             # injection, so the ``"interactive"`` policy skips the
             # checkpoint here. REPL (``message is None``) is multi-turn.
-            interactive=message is None,
+            # --profile / config / RAVEN_PROFILE override the inference.
+            profile=resolve_profile(
+                cli=profile,
+                config=config.agents.defaults.run_profile or None,
+                interactive=message is None,
+                domain_cli=domain,
+                domain_config=config.agents.defaults.domain or None,
+            ),
             response_modifier=sentinel_response_modifier,
             on_user_inbound=sentinel_on_user_inbound,
             backend=backend,
