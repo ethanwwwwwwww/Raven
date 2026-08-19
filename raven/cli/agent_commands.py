@@ -32,7 +32,6 @@ from raven.cli._helpers import (
     make_provider,
     parse_fake_now,
     print_deprecated_memory_window_notice,
-    warn_about_pending_cli_reminders,
 )
 from raven.cli._plugin_stack import (
     build_plugin_registry,
@@ -131,8 +130,8 @@ async def _read_interactive_input_async() -> str:
         raise RuntimeError("Call _init_prompt_session() first")
     try:
         # raw=True passes ANSI escape sequences through verbatim. Without
-        # this, background coroutines (cron fires, Sentinel nudges) that
-        # print rich-styled output while the user sits at this prompt get
+        # this, background coroutines (Sentinel nudges) that print
+        # rich-styled output while the user sits at this prompt get
         # their ESC bytes mangled — visible as ?[36m...?[0m garbage.
         with patch_stdout(raw=True):
             return await _PROMPT_SESSION.prompt_async(
@@ -228,15 +227,12 @@ def register(app: typer.Typer) -> None:
 
         from raven.agent.loop import AgentLoop
         from raven.agent.loop.recovery import limits_from_defaults
-        from raven.cli._cron_handler import make_on_cron_job
         from raven.cli._proactive_stack import (
             attach_sentinel_decision_consumer,
             attach_sentinel_spawn,
             build_sentinel_stack,
         )
-        from raven.config.paths import get_cron_dir
         from raven.config.raven import load_raven_config
-        from raven.proactive_engine.schedulers.cron.service import CronService
         from raven.providers.tool_args import limits_from_defaults as tool_args_limits_from_defaults
         from raven.session.manager import SessionManager, new_chat_id
 
@@ -271,16 +267,10 @@ def register(app: typer.Typer) -> None:
 
             session_id = resolve_session_cross_channel(session_manager, session_id)
 
-        # Create cron service (callback set below once the agent exists).
-        # allowed_channels={"cli"} prevents this REPL from claiming reminders
-        # created in Feishu/Telegram/etc. — those should be delivered by the
-        # gateway which has the real channel adapters wired up.
-        cron_store_path = get_cron_dir() / "jobs.json"
-        cron = CronService(
-            cron_store_path,
-            allowed_channels={"cli"},
-            now_fn=parse_fake_now(fake_now),
-        )
+        # No CronService on the agent path: a coding agent schedules nothing,
+        # and the service's eager store-dir creation left an empty cron/ next
+        # to every config file. Reminders belong to the gateway/TUI, which
+        # wire their own service; ``raven cron`` manages the shared jobs.json.
 
         # Build Sentinel stack if enabled — same wiring gateway uses, so the two
         # processes share state via ~/.raven/sentinel/state.json. Discover
@@ -340,7 +330,6 @@ def register(app: typer.Typer) -> None:
             media_config=config.effective_media_config(),
             deep_research_config=config.tools.deep_research,
             exec_config=config.tools.exec,
-            cron_service=cron,
             restrict_to_workspace=config.tools.restrict_to_workspace,
             compaction=config.agents.defaults.compaction,
             wrap_tool_outputs=config.tools.wrap_tool_outputs,
@@ -377,8 +366,6 @@ def register(app: typer.Typer) -> None:
         cli_shim = SimpleNamespace(enabled_channels=["cli"])
         if sentinel_runner is not None:
             sentinel_runner.set_channel_manager(cli_shim)
-        # cron.on_job is wired inside run_interactive once the spine scheduler
-        # exists — cron reminders submit CRON turns through it.
 
         # Show spinner when logs are off (no output to miss); skip when logs are on
         def _thinking_ctx():
@@ -467,7 +454,7 @@ def register(app: typer.Typer) -> None:
             asyncio.run(run_once())
         else:
             # Interactive mode — user turns run through spine (submit -> lane ->
-            # hub -> CliOutlet); cron/sentinel nudges go via the spine hub
+            # hub -> CliOutlet); sentinel nudges go via the spine hub
             # (hub.post -> CliOutlet) too.
             from raven.cli._repl_spine import build_repl, run_repl_loop
 
@@ -511,10 +498,7 @@ def register(app: typer.Typer) -> None:
                 # spine. Gathered on teardown.
                 runtime_task = asyncio.create_task(agent_loop.run())
 
-                # Build the spine before starting cron: cron jobs submit CRON
-                # turns through this scheduler, and on_job must be wired
-                # before cron.start() so an immediately-firing job has its
-                # callback. Scheduler pins its home loop here (run_interactive is
+                # Scheduler pins its home loop here (run_interactive is
                 # async) — it must not move to the sync prologue.
                 def _render_nudge_marker() -> None:
                     console.print()
@@ -532,26 +516,10 @@ def register(app: typer.Typer) -> None:
                 )
                 # Subagent result re-injection submits a SUBAGENT-origin turn.
                 agent_loop.subagents.set_submit(scheduler.submit)
-                # Cron reminders run as CRON-origin turns through the spine
-                # scheduler, delivered by the hub -> CliOutlet (replacing the
-                # legacy bus path). readback_texts/system_events stay unset: the
-                # REPL has no heartbeat, so the handler no-ops them.
-                cron.on_job = make_on_cron_job(
-                    agent_loop,
-                    hub,
-                    submit=scheduler.submit,
-                    channel_manager=cli_shim,
-                    session_manager=session_manager,
-                    default_channel="cli",
-                )
                 # Sentinel nudges now ride the spine hub -> CliOutlet (replacing
                 # the legacy bus consume): late-bind the REPL hub's post.
                 if sentinel_runner is not None and sentinel_runner.dispatcher is not None:
                     sentinel_runner.dispatcher.set_post(hub.post)
-                # Start cron so scheduled reminders ("remind me in 1 minute")
-                # actually fire — previously the REPL created a CronService but
-                # never started its tick loop, so jobs just sat in jobs.json.
-                await cron.start()
                 # Start Sentinel if enabled so anticipatory nudges reach the REPL.
                 # Nudges ride the spine hub -> CliOutlet (which renders the 🐦‍⬛
                 # proactive marker for _sentinel_origin); no bus consumer here.
@@ -582,7 +550,6 @@ def register(app: typer.Typer) -> None:
                 finally:
                     if sentinel_runner is not None:
                         await sentinel_runner.stop()
-                    cron.stop()
                     agent_loop.stop()
                     await teardown()  # scheduler.shutdown + hub.aclose (honors the shutdown contract)
                     await asyncio.gather(runtime_task, return_exceptions=True)
@@ -609,7 +576,6 @@ def register(app: typer.Typer) -> None:
                             logger.exception(
                                 "memory backend stop failed; continuing shutdown",
                             )
-                    warn_about_pending_cli_reminders(cron, config)
 
             asyncio.run(run_interactive())
 
