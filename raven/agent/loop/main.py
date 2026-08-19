@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 from contextlib import AsyncExitStack, aclosing
@@ -162,6 +163,34 @@ _MAX_ITER_STATIC_FALLBACK = (
     "I reached the maximum number of tool call iterations ({n}) without "
     "completing the task. You can try breaking the task into smaller steps."
 )
+
+# Task deadline awareness: harnesses and schedulers export RAVEN_TASK_DEADLINE_EPOCH
+# (unix seconds) when a turn runs under a hard wall-clock budget. The loop warns the
+# model once when the budget runs low -- with its full working context still live,
+# which no after-the-fact recovery has -- and stops starting new iterations when a
+# call could no longer finish. An unwritten perfect answer scores nothing.
+_DEADLINE_WARN_SEC = 420
+_DEADLINE_HARD_STOP_SEC = 60
+_DEADLINE_WRAPUP_NOTICE = (
+    "[deadline notice] About {remaining} seconds of task budget remain. Stop "
+    "exploration and analysis now. Use the remaining time only to deliver: produce "
+    "the final answer from results you already have, write any output files the "
+    "task instructions require, and compute nothing new beyond what writing the "
+    "answer requires. If several candidate answers exist, commit to the most "
+    "literal reading of the question. A partial but delivered answer beats an "
+    "unfinished perfect one."
+)
+
+
+def _task_deadline_epoch() -> float | None:
+    raw = os.environ.get("RAVEN_TASK_DEADLINE_EPOCH", "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
 
 # Origins whose turns skip the user-inbound hooks (engagement / decision): a turn
 # from one of these is not genuine user input. cron/heartbeat are deliberately
@@ -2121,7 +2150,25 @@ class AgentLoop:
         # reach a batch run's captured output.
         gate_triggers: dict[str, int] = {}
 
+        task_deadline = _task_deadline_epoch()
+        deadline_warned = False
+
         while iteration < self.max_iterations:
+            if task_deadline is not None:
+                remaining = task_deadline - time.time()
+                if remaining <= _DEADLINE_HARD_STOP_SEC:
+                    logger.info("task deadline reached ({:.0f}s left); ending the turn", remaining)
+                    status = "deadline"
+                    break
+                if not deadline_warned and remaining <= _DEADLINE_WARN_SEC:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": _DEADLINE_WRAPUP_NOTICE.format(remaining=int(remaining)),
+                        }
+                    )
+                    deadline_warned = True
+                    logger.info("task deadline near ({:.0f}s left); wrap-up notice injected", remaining)
             iteration += 1
             logger.info(
                 "Iteration {}/{} model={}",

@@ -399,6 +399,7 @@ def _build_tui_agent_loop():
             config.workspace_path,
             ec_config,
             registry=plugin_registry,
+            provider=provider,
         )
 
         agent_loop = AgentLoop(

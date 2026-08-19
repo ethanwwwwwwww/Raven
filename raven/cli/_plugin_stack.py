@@ -41,6 +41,7 @@ from raven.plugin import (
 if TYPE_CHECKING:
     from raven.config.raven import RavenConfig
     from raven.memory_engine import MemoryBackend
+    from raven.providers.base import LLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +52,17 @@ def plugin_discovery_sources() -> dict:
     Shared by :func:`build_plugin_registry` (live boot) and the
     ``raven plugins`` CLI command so both see the same set:
 
-    - bundled — ``raven/plugin/memory/`` inside the package.
+    - bundled — ``raven/plugin/`` inside the package (plus the legacy
+      ``raven/plugin/memory/`` nesting where the everos backend lives).
     - user    — ``~/.raven/plugin/``.
     - project — ``./.raven/plugin/``.
     - entry_points — the ``raven.plugins`` group.
     """
     import raven
 
+    plugin_root = Path(raven.__path__[0]) / "plugin"
     return {
-        "bundled_dir": Path(raven.__path__[0]) / "plugin" / "memory",
+        "bundled_dir": (plugin_root, plugin_root / "memory"),
         "user_dir": Path.home() / ".raven" / "plugins",
         "project_dir": Path.cwd() / ".raven" / "plugins",
         "entry_points_group": "raven.plugins",
@@ -88,10 +91,12 @@ def build_plugin_registry(
       third-party pip-installed plugins register their factories.
     """
     disabled = frozenset(config.plugins.disabled)
+    enabled = frozenset(config.plugins.enabled)
     try:
         return assemble_plugin_registry(
             **plugin_discovery_sources(),
             disabled=disabled,
+            enabled=enabled,
         )
     except (PluginConflictError, PluginFactoryImportError) as e:
         logger.warning(
@@ -165,6 +170,7 @@ def build_plugin_tools(
     config: "RavenConfig",
     *,
     registry: PluginRegistry | None = None,
+    provider: "LLMProvider | None" = None,
 ) -> list:
     """Construct every plugin-contributed tool admitted by ``config``.
 
@@ -185,7 +191,7 @@ def build_plugin_tools(
     names = registry.tool_names()
     if not names:
         return []
-    services = ServiceLocator(workspace=workspace)
+    services = ServiceLocator(workspace=workspace, provider=provider)
     slices = config.plugins.config
     tools = []
     for name in names:

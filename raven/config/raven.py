@@ -1099,6 +1099,11 @@ class PluginsConfig(_Base):
     disabled: list[str] = Field(default_factory=list)
     """Plugin ids the user opted out of (e.g. ``["everos-memory"]``)."""
 
+    enabled: list[str] = Field(default_factory=list)
+    """Explicit opt-in for plugins that ship ``enabled_by_default = false``
+    (e.g. ``["data-agent"]``). Ignored for plugins that are on by default;
+    ``disabled`` always wins over ``enabled``."""
+
     config: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Per-plugin configuration, keyed by plugin id. Each plugin's
     factory receives ``ctx.config = plugins.config.get(<id>, {})``."""
