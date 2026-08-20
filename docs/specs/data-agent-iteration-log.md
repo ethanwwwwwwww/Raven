@@ -667,6 +667,34 @@ R9 队列（按预期收益）：1) 答案交付层——「对的值×错的载
 
 **状态**:该配对规则已实现(deliver.py 描述层)、63 单测通过、污染门 0 发现、已同步 box——但**未做实跑验证**:OpenRouter 余额 $2.11,凑不出带 GITHUB q4 哨兵的 k=3 一轮,而无哨兵覆盖的改动按 R20 教训不可采信。留待下次预算。
 
+### R28 · 2026-08-20 · 校准分层:通用内核(GENERAL)与基准调优包(DAB pack)分家
+
+**动机**:对抗性审计(2026-08-20)按浓度分了四档 DAB 指纹——字面值可溯源(`[silence]`/`[untitled]`/`9.99e32`/描述里点名 `M`、`[Not Available]`)、通用外衣下的 DAB 形状参数(`_SYNONYM_TOKEN_MIN=5`/8 字符词干/"code-shaped values included")、机制干净但出生可疑(top-k 并列普查、excluded_populations)、harness 耦合(`question_path` 出厂默认指向 dab 文件)。同时确认 owner 正本判据(`SUBMISSION_RUBRIC.md`)只罚泄漏、明确允许对 sanctioned data 做 profiling——指纹问题衡量的是我们自己的北极星,不是榜单合规。决定:不删机制,把"变化的东西"抽成数据。
+
+**机制**(新模块 `calibration.py`):Profile = 四个维度的数据类——gates(5 个交付门各自 refuse/warn/off)、thresholds(11 个从模块常量收编的数字旋钮)、lexicons(跨域基础词表 + 可注入的 extra)、fragments(工具描述/survey 行里的文本槽位)。repo 只带 `GENERAL`(全门 warn、无指纹)与 `STRICT`(全门 refuse,无人值守批处理用);运行配置经 `profile`/`profile_file`/`profile_overrides` 三层叠加,未知键一律 ValueError。
+
+**去指纹的具体走向**:
+- `[silence]`/`[untitled]` 字面值 → 结构化规则 `^\[.*\]$`(整值方括号 = 注解非实体,resolve_entities 永不合并);
+- `9.99e32` 字面值 → profile 工具新增**重复极值推断**(min/max 重复 ≥ max(3, 0.5% 行) 且 distinct ≥ 20 → `REPEATED-EXTREME?`),形状推断替代拼写清单;
+- 描述文本点名的 `M`/`[Not Available]` → fragment 槽位,GENERAL 填通用表述;
+- "(code-shaped values included)" → fragment 槽位,GENERAL 为空;
+- `question_path` 默认 → 中性 `/workspace/question.txt`;
+- 阈值(词干 5/8、句式家族 6/20/0.6/0.95/40/32/0.05 等)→ 收进 Thresholds,声明为"未跨域验证的校准",GENERAL 保持现值。
+
+**DAB 包**移居 AgentEval:`configs/dataagentbench.raven-data-agent-profile.yaml`(全门 refuse + extra 词表 + 两个 fragment + dab 的 question_path 走 run config),随提交配置披露,注明 extra 来源于 rubric §1 允许的 sanctioned-data profiling。
+
+**验证(零实跑成本)**:重构前冻结 8 个工具的 description+parameters → 重构后 DAB 包渲染**逐字节一致(diffs: NONE)**,GENERAL 仅 profile 描述一处有意差异;69 单测全绿(新增 6 个:warn/off 语义、三层解析、fragment/词表注入、重复极值、方括号规则);leak_check(插件源码 + 测试文件)**0 findings**——顺带清掉了测试 fixture 里五处沉睡的 GT 值(music q3 荷兰语标题两处、yelp 类目串、PATENTS 年份、`repo_name`/`rating` 列名)。warn 语义:门在 GENERAL 下不再打回,答案照写、`[ADVISORY]` 随成功结果返回,一次性门保持一次性。
+
+**遗留**:box 上的运行配置尚未接入 profile(box 代码仍是重构前版本,行为不变);下次全量/靶向轮换用新栈时,run yaml 的 data-agent 段需加 `question_path: /workspace/dab_question.txt` + pack 的 `profile_overrides`,并按惯例带 GITHUB q4 哨兵先验一轮。
+
+### R28b · 2026-08-20 · 语义钉扎(features 开关)+ files 数据源(CSV/JSON/Parquet/xlsx)
+
+**语义钉扎**。R28 引入的两个通用机制(方括号占位符规则、重复极值推断)在 DAB 包下也会生效——提示面逐字节一致但运行时行为是附加的,严格说破坏"与打分时语义一致"。补 `features` 段(`bracketed_placeholders` / `repeated_extreme`),GENERAL 全开,DAB 包全关。五项等价验证全过:(1) 包渲染提示面 vs 重构前 8 工具 description+parameters **逐字节一致**;(2) 包哨兵集合 == 旧 `_SENTINELS` 字面集合;(3) 包占位符归一化键集 == 旧 `_NA_KEYS`;(4) 占位符谓词在两版实现上对全部探针值(含方括号/数字/占位词/正常标题)**零分歧**;(5) 门拒绝文案由 STRICT 档测试按旧原文断言通过。结论:**挂 DAB 包 = R27 打分栈语义完全一致**,复现旧结果不需要钉代码版本。唯一注意项:旧栈的 `question_path` 默认值内置,新栈必须在 run config 里显式给 `question_path: /workspace/dab_question.txt`,漏配则 for_each 门静默失效。
+
+**files 数据源**。新 source kind `files`(session.py 白名单 + kernel `_attach_files`,纯 stdlib):ref 接受单文件/目录(递归)/glob,按后缀注册视图(csv/tsv/txt→read_csv_auto、parquet、json/jsonl/ndjson→read_json_auto、xlsx→excel 扩展,不可用时逐文件降级报告)。设计要点:(1) 视图建好即做全量 COUNT 验证——惰性视图把解析错误拖到分析中途比慢启动更糟;(2) CSV 解析失败按梯子降级:严格 → latin-1 编码 → ignore_errors → 两者兼施,**每一档降级都写进 attach note**(静默丢行是 agent 没选过的总体过滤,与 excluded_populations 同一错误类别);(3) 文件名消毒为视图名、重名加序号、64 文件封顶、note 超 12 条聚合。实测 `SHOW ALL TABLES` 可见视图,survey/profile/join 全链路零改动点亮(跨源 join CSV×duckdb 测试通过);二级降级路径 duckdb_tables() 不含视图,是已知缺口,仅在 scanner 崩溃时才走到。**复现零影响**:DAB 的 sources 从不使用该 kind,bootstrap 循环只多一个 elif 分支。
+
+**验证**:76 单测(新增 7:features 钉扎回归 ×2、files 挂载/join/survey 可见/编码降级/空目录报告/parse_sources)、leak_check 0 findings。
+
 ### 附录 · 成本记录（token 归集，2026-08-17 起补记）
 
 数据源：各 attempt 的 `agent/llm_usage.jsonl`（逐调用 input/output/cache 命中）。单位：百万 token。只记 token 硬数据，不折算货币（单价随供应商变动）。

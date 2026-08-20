@@ -35,4 +35,11 @@ DAB 测不到、CSV 分析等真实场景需要的:开放式任务("帮我分析
 
 ## 明确不做
 
-per-question 证据包与点名题号的 prompt 补丁(EQ 路线);"避开并列答案"类评分器博弈;泄露 scorer 机制的措辞;一切需要读 ground_truth/validate.py 源码的手段。
+repo/GENERAL 内的 per-question 证据包与点名题号的 prompt 补丁;"避开并列答案"类评分器博弈;泄露 scorer 机制的措辞;一切需要读 ground_truth/validate.py 源码的手段。
+
+**边界更新(2026-08-20,Ethan 拍板)**:rubric 合法的 per-question 调优(EQ 路线)允许作为 **DAB 包上的支线实验**——随提交配置披露、永不进 repo/GENERAL、不作为主线;主线仍是机制路线。
+
+## 第二轴进展(2026-08-20)
+
+- 校准分层落地(R28/R28b):GENERAL(warn 档、零指纹)与 DAB 包(AgentEval `configs/dataagentbench.raven-data-agent-profile.yaml`,钉死 R27 语义)分家;详见 iteration-log R28/R28b。
+- **files 数据源已支持**(CSV/TSV/Parquet/JSON/JSONL/xlsx → 视图 + 解析降级报告),exploratory 轴的"乱编码/摄取容错"部分收窄为:GBK 等非 latin-1 编码、xlsx 多 sheet、精确丢行计数;交互层(澄清、多轮口径、报告交付物)仍未排期。
