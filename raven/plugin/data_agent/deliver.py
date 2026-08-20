@@ -17,6 +17,7 @@ from typing import Any
 
 from raven.agent.tools.base import Tool
 from raven.plugin.context import PluginContext
+from raven.plugin.data_agent.calibration import GENERAL, DataAgentProfile, resolve_profile
 
 _MIN_REASON_CHARS = 40
 _MAX_ROWS = 10_000
@@ -38,10 +39,12 @@ class SubmitAnswerTool(Tool):
     def __init__(
         self,
         answer_path: str = "/workspace/answer.txt",
-        question_path: str = "/workspace/dab_question.txt",
+        question_path: str = "/workspace/question.txt",
+        profile: DataAgentProfile | None = None,
     ) -> None:
         self._answer_path = answer_path
         self._question_path = question_path
+        self._profile = profile or GENERAL
         self._for_each_warned = False
         self._single_reading_warned = False
 
@@ -183,52 +186,82 @@ class SubmitAnswerTool(Tool):
             )
         if not (selected_reading or "").strip():
             return "[SUBMIT_ANSWER REFUSED] selected_reading is required."
+        advisories: list[str] = []
+
+        def gate(gate_id: str, message: str) -> str | None:
+            """Route one fired gate through the profile: refuse returns the
+            blocking reply, warn records an advisory that rides on the write."""
+            mode = self._profile.gate_mode(gate_id)
+            if mode == "refuse":
+                return f"[SUBMIT_ANSWER REFUSED] {message}"
+            if mode == "warn":
+                advisories.append(message)
+            return None
+
         # One in-session refusal while the tools are still in hand beats any
         # post-hoc repair: a gate can reformat a delivered answer but cannot
         # compute the fields the agent never fetched. Refuse once, then defer
         # to the agent's judgment (some questions genuinely have few groups).
-        if len(rows) < 3 and not self._for_each_warned:
+        if (
+            len(rows) < self._profile.thresholds.for_each_min_rows
+            and not self._for_each_warned
+            and self._profile.gate_mode("for_each") != "off"
+        ):
             question = self._read_question()
             if question and _FOR_EACH_RE.search(question):
                 self._for_each_warned = True
-                return (
-                    "[SUBMIT_ANSWER REFUSED] the question says 'for each' a group, yet "
+                refused = gate(
+                    "for_each",
+                    "the question says 'for each' a group, yet "
                     f"only {len(rows)} rows are delivered. 'For each G' means one rows "
                     "element per G present in the data, each carrying every field the "
                     "question asks (names/titles included) -- a best/highest/latest "
                     "selects WITHIN each group, it never filters which groups appear. "
                     "Recompute the full per-group result, then submit again. If the data "
-                    "truly contains fewer than 3 groups, resubmit as is."
+                    "truly contains fewer than 3 groups, resubmit as is.",
                 )
+                if refused:
+                    return refused
         # The R18a failure mode is not a bad adjudication but a missing one: the
         # agent never suspects a second reading exists, leaves rejected_readings
         # empty, and every reason-side gate is bypassed. A short answer with no
         # alternatives is where that mode concentrates, so refuse once while the
         # tools are still in hand, then defer to the agent's judgment.
-        if not rejected_readings and len(rows) <= 2 and not self._single_reading_warned:
+        if (
+            not rejected_readings
+            and len(rows) <= self._profile.thresholds.single_reading_max_rows
+            and not self._single_reading_warned
+            and self._profile.gate_mode("single_reading") != "off"
+        ):
             self._single_reading_warned = True
-            return (
-                f"[SUBMIT_ANSWER REFUSED] a {len(rows)}-row answer delivered with no "
+            refused = gate(
+                "single_reading",
+                f"a {len(rows)}-row answer delivered with no "
                 "alternative readings usually means none were looked for, not that none "
                 "exist. Walk the reading families -- record-weighted vs entity-weighted, "
                 "exact vs contains matching, raw vs deduplicated grain, strict vs lenient "
                 "predicate, time-window anchoring -- and compute any that is defensible "
                 "for this question (each listed in rejected_readings with the value it "
-                "produced). If the question truly reads only one way, resubmit as is."
+                "produced). If the question truly reads only one way, resubmit as is.",
             )
+            if refused:
+                return refused
         # An adjudication between readings is only evidence-backed if it cites
         # measured quantities. Single-record inspection produces prose; probes
         # produce numbers -- population-wide counts or rates for each reading
         # (how often each candidate fires across ALL records, not just the
         # target) are what separates the real hit from plausible background.
         if rejected_readings and len(_NUMBER_RE.findall(reason or "")) < 2:
-            return (
-                "[SUBMIT_ANSWER REFUSED] the adjudication rejects alternative readings but "
+            refused = gate(
+                "numbers_in_reason",
+                "the adjudication rejects alternative readings but "
                 "cites no measured quantities. Run the probes and put their numbers in "
                 "reason: population-wide counts or rates per candidate reading (a candidate "
                 "that fires on nearly every record, or on none, is background, not the "
-                "answer), then submit again."
+                "answer), then submit again.",
             )
+            if refused:
+                return refused
         uncomputed = [
             str(r)
             for r in (rejected_readings or [])
@@ -236,13 +269,16 @@ class SubmitAnswerTool(Tool):
         ]
         if uncomputed:
             preview = "; ".join(u[:80] for u in uncomputed[:2])
-            return (
-                f"[SUBMIT_ANSWER REFUSED] {len(uncomputed)} rejected reading(s) carry no "
+            refused = gate(
+                "uncomputed_rejections",
+                f"{len(uncomputed)} rejected reading(s) carry no "
                 f"computed value: {preview!r}. A reading you did not compute is not "
                 "rejected -- it is ignored. Rerun each as a query and put the value it "
                 "produced inside its entry (or state that its column/field does not exist "
-                "in the data), then submit again."
+                "in the data), then submit again.",
             )
+            if refused:
+                return refused
         # An exclusion the question never asked for silently redefines the
         # population, and nothing in the delivered rows shows it happened: the
         # dropped rows leave no trace in the result. Declaring one is therefore
@@ -251,13 +287,16 @@ class SubmitAnswerTool(Tool):
         unmeasured = [str(e) for e in (excluded_populations or []) if not _NUMBER_RE.search(str(e))]
         if unmeasured:
             preview = "; ".join(u[:80] for u in unmeasured[:2])
-            return (
-                f"[SUBMIT_ANSWER REFUSED] {len(unmeasured)} self-imposed exclusion(s) are "
+            refused = gate(
+                "unmeasured_exclusions",
+                f"{len(unmeasured)} self-imposed exclusion(s) are "
                 f"declared without measurement: {preview!r}. For each one, report how many "
                 "rows or entities it removed and what the answer becomes when those rows "
                 "stay in -- an exclusion whose effect you have not computed is a guess "
-                "about which data belongs to the question. Then submit again."
+                "about which data belongs to the question. Then submit again.",
             )
+            if refused:
+                return refused
 
         import json
 
@@ -275,11 +314,17 @@ class SubmitAnswerTool(Tool):
         adjudication.write_text(
             json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        return (
+        out = (
             f"wrote {len(rows)} rows to {path}; adjudication recorded. Re-read the question "
             "once against the delivered rows: every part answered, at the right grain, in the "
             "right unit and format?"
         )
+        if advisories:
+            out += "".join(f"\n[ADVISORY] {a}" for a in advisories) + (
+                "\n(The answer was written as delivered; if any advisory changes the "
+                "result, submit again to replace it.)"
+            )
+        return out
 
 
     def _read_question(self) -> str:
@@ -293,5 +338,6 @@ def make_submit_answer_tool(ctx: PluginContext) -> Tool:
     config = ctx.config or {}
     return SubmitAnswerTool(
         answer_path=str(config.get("answer_path") or "/workspace/answer.txt"),
-        question_path=str(config.get("question_path") or "/workspace/dab_question.txt"),
+        question_path=str(config.get("question_path") or "/workspace/question.txt"),
+        profile=resolve_profile(config),
     )

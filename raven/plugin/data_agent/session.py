@@ -47,9 +47,11 @@ class KernelError(RuntimeError):
 class SourceSpec:
     """One configured store to attach to the plane.
 
-    ``kind`` is sqlite | duckdb | postgres | mongo. ``ref`` is a file path
-    (sqlite/duckdb), a libpq DSN (postgres), or a mongo URI (mongo). ``alias``
-    is the schema name the model sees, e.g. ``metadata.articles``.
+    ``kind`` is sqlite | duckdb | postgres | mongo | files. ``ref`` is a file
+    path (sqlite/duckdb), a libpq DSN (postgres), a mongo URI (mongo), or --
+    for files -- a data file, a directory of them, or a glob (csv/tsv/parquet/
+    json/xlsx registered as views). ``alias`` is the schema name the model
+    sees, e.g. ``metadata.articles``.
     """
 
     alias: str
@@ -60,7 +62,7 @@ class SourceSpec:
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "SourceSpec":
         kind = str(d.get("kind", "")).lower()
-        if kind not in {"sqlite", "duckdb", "postgres", "mongo"}:
+        if kind not in {"sqlite", "duckdb", "postgres", "mongo", "files"}:
             raise ValueError(f"unsupported source kind {kind!r} (alias {d.get('alias')!r})")
         ref = d.get("ref") or d.get("path") or d.get("dsn") or d.get("uri")
         if not ref:

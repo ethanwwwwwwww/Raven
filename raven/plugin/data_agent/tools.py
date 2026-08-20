@@ -19,12 +19,14 @@ from typing import Any
 
 from raven.agent.tools.base import Tool
 from raven.plugin.context import PluginContext
+from raven.plugin.data_agent.calibration import GENERAL, DataAgentProfile, resolve_profile
 from raven.plugin.data_agent.session import DataAgentSession, get_session, parse_sources
 from raven.plugin.data_agent.sqlgate import SqlRejectedError, ensure_read_only, wrap_with_cap
 
 _PREVIEW_ROWS = 50
 _HARD_ROW_CAP = 100_000
-_SENTINELS = {"", "na", "n/a", "nan", "null", "none", "-", "--", "?", "unknown", "-999", "9.99e32"}
+_EXTREME_MIN_REPEATS = 3
+_EXTREME_MIN_DISTINCT = 20
 
 
 class _KernelQueryError(RuntimeError):
@@ -204,8 +206,10 @@ class ProfileTool(Tool):
 
     timeout_seconds = 180.0
 
-    def __init__(self, session: DataAgentSession) -> None:
+    def __init__(self, session: DataAgentSession, profile: DataAgentProfile | None = None) -> None:
         self._session = session
+        self._profile = profile or GENERAL
+        self._sentinels = (profile or GENERAL).lexicons.sentinel_values()
 
     @property
     def name(self) -> str:
@@ -213,10 +217,13 @@ class ProfileTool(Tool):
 
     @property
     def description(self) -> str:
+        examples = self._profile.fragment(
+            "profile.sentinel_examples", "NA, -999, empty, repeated extreme constants"
+        )
         return (
             "Profile a table or one column: row count, per-column dtype, null rate, distinct "
             "count, top-k values with frequencies, numeric min/max, and flags for suspected "
-            "sentinel values (M, NA, -999, empty, [Not Available]) and mixed-type columns. "
+            f"sentinel values ({examples}) and mixed-type columns. "
             "Prefer this and distinct_values over pulling sample rows."
         )
 
@@ -257,7 +264,7 @@ class ProfileTool(Tool):
                 continue
             null_rate = 0.0 if total == 0 else (total - nn) / total
             info = [f"non_null={nn}", f"n_distinct={nd}", f"null_rate={null_rate:.3f}"]
-            # top-k value frequencies (low-card lens; surfaces sentinels like "M")
+            # top-k value frequencies (low-card lens; surfaces repeated sentinel spellings)
             try:
                 topk_rows = (
                     await _query(
@@ -269,7 +276,7 @@ class ProfileTool(Tool):
                 ).get("rows") or []
                 if topk_rows:
                     info.append("top=" + ", ".join(f"{v!r}:{c}" for v, c in topk_rows))
-                    suspects = [v for v, _ in topk_rows if str(v).strip().lower() in _SENTINELS or _bracketed(v)]
+                    suspects = [v for v, _ in topk_rows if str(v).strip().lower() in self._sentinels or _bracketed(v)]
                     if suspects:
                         info.append(f"SENTINEL? {suspects}")
             except _KernelQueryError:
@@ -294,6 +301,35 @@ class ProfileTool(Tool):
                     )
                     if 0 < castable < nn:
                         info.append(f"MIXED-TYPE? {castable}/{nn} values are numeric")
+                    # A real distribution's exact min/max occurs a handful of
+                    # times; a missing-data code repeats at the extreme. This
+                    # infers the sentinel from shape instead of a spelling list.
+                    if (
+                        self._profile.features.repeated_extreme
+                        and nd >= _EXTREME_MIN_DISTINCT
+                        and castable
+                    ):
+                        extremes = _one_row(
+                            await _query(
+                                self._session,
+                                f"SELECT SUM(CASE WHEN TRY_CAST({q} AS DOUBLE) = {float(lo)!r} "
+                                "THEN 1 ELSE 0 END), "
+                                f"SUM(CASE WHEN TRY_CAST({q} AS DOUBLE) = {float(hi)!r} "
+                                f"THEN 1 ELSE 0 END) FROM {table}",
+                            )
+                        )
+                        floor = max(_EXTREME_MIN_REPEATS, int(0.005 * castable))
+                        hits = []
+                        if int(extremes[0] or 0) >= floor:
+                            hits.append(f"min {lo} x{int(extremes[0])}")
+                        if float(hi) != float(lo) and int(extremes[1] or 0) >= floor:
+                            hits.append(f"max {hi} x{int(extremes[1])}")
+                        if hits:
+                            info.append(
+                                "REPEATED-EXTREME? " + ", ".join(hits)
+                                + " -- an extreme repeated this often is usually a "
+                                "missing-data code, not a measurement; check before aggregating"
+                            )
             except _KernelQueryError:
                 pass
             lines.append(f"  {col}: " + " ".join(info))
@@ -509,7 +545,7 @@ def make_python_tool(ctx: PluginContext) -> Tool:
 
 
 def make_profile_tool(ctx: PluginContext) -> Tool:
-    return ProfileTool(_session_from_ctx(ctx))
+    return ProfileTool(_session_from_ctx(ctx), profile=resolve_profile(ctx.config or {}))
 
 
 def make_distinct_values_tool(ctx: PluginContext) -> Tool:

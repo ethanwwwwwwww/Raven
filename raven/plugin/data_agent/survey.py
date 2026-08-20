@@ -20,6 +20,7 @@ from typing import Any
 
 from raven.agent.tools.base import Tool
 from raven.plugin.context import PluginContext
+from raven.plugin.data_agent.calibration import GENERAL, DataAgentProfile, resolve_profile
 from raven.plugin.data_agent.session import DataAgentSession
 
 _SYSTEM_SCHEMAS = {"information_schema", "pg_catalog", "temp", "system"}
@@ -29,30 +30,22 @@ _TOP_VALUES = 4
 _SOURCE_BUDGET_SEC = 60.0
 _SUMMARY_CHARS = 4000
 _NOTES_PATH = "/workspace/survey.md"
-_SYNONYM_TOKEN_MIN = 5
 _FD_MAX_PAIRS_PER_TABLE = 6
 _FD_MAX_DISTINCT = 2000
 _PLACEHOLDERS = {"na", "n/a", "none", "null", "unknown", "-", "--", "#", ""}
 _BRACKET_RE = re.compile(r"^\s*\[.*\]\s*$")
-_TEMPLATE_FAMILIES = 6
-_TEMPLATE_MIN_ROWS = 20
-_TEMPLATE_MIN_COVERAGE = 0.6
-_NEAR_FD_PURITY = 0.95
-_PHRASING_MIN_AVG_LEN = 40
-_PHRASING_PREFIX_CHARS = 32
-_FREE_TEXT_SHAPE_RATIO = 0.05
 
 
-def _tokens(name: str) -> set[str]:
+def _tokens(name: str, min_len: int, stem_chars: int) -> set[str]:
     parts = re.split(r"[_\W]+", re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name))
     out = set()
     for p in parts:
         p = p.lower()
-        if len(p) < _SYNONYM_TOKEN_MIN:
+        if len(p) < min_len:
             continue
-        # An 8-char stem folds inflections of one concept ("category" /
+        # A short stem folds inflections of one concept ("category" /
         # "categorical") into the same group.
-        out.add(p[:8] if len(p) >= 8 else p)
+        out.add(p[:stem_chars] if len(p) >= stem_chars else p)
     return out
 
 
@@ -65,9 +58,14 @@ class SurveySourcesTool(Tool):
 
     timeout_seconds = 600.0
 
-    def __init__(self, session: DataAgentSession) -> None:
+    def __init__(self, session: DataAgentSession, profile: DataAgentProfile | None = None) -> None:
         self._session = session
+        self._profile = profile or GENERAL
         self._session_notes: list[str] = []
+
+    def _name_tokens(self, name: str) -> set[str]:
+        th = self._profile.thresholds
+        return _tokens(name, th.synonym_token_min, th.synonym_stem_chars)
 
     @property
     def name(self) -> str:
@@ -444,8 +442,9 @@ class SurveySourcesTool(Tool):
         )[0]
         if not row or row[0] is None:
             return
+        th = self._profile.thresholds
         avg_len, rows_total = float(row[0]), int(row[1])
-        if avg_len < _PHRASING_MIN_AVG_LEN or rows_total < _TEMPLATE_MIN_ROWS:
+        if avg_len < th.phrasing_min_avg_len or rows_total < th.template_min_rows:
             return
         # Volatile parts out (ids, uuids, numbers), then group on the opening of
         # each value. Masking content words as well was measured on real prose
@@ -458,7 +457,7 @@ class SurveySourcesTool(Tool):
             "'[0-9A-Fa-f]{8}-[0-9A-Fa-f-]{4,}', 'U', 'g'), '[0-9]+([.,][0-9]+)*', 'N', 'g'), "
             "'[A-Z]{2,}[-N]+', 'ID', 'g')"
         )
-        fam_expr = f"substr({masked}, 1, {_PHRASING_PREFIX_CHARS})"
+        fam_expr = f"substr({masked}, 1, {th.phrasing_prefix_chars})"
         row2 = (
             await self._q(
                 f"SELECT COUNT(DISTINCT {fam_expr}) FROM {fq} WHERE {q} IS NOT NULL", deadline
@@ -470,11 +469,11 @@ class SurveySourcesTool(Tool):
         # rows means genuinely free text (documents, comments), where a shape
         # census says nothing -- staying quiet there is what keeps the line
         # worth reading.
-        if shapes_total < 2 or shapes_total > max(8, _FREE_TEXT_SHAPE_RATIO * rows_total):
+        if shapes_total < 2 or shapes_total > max(8, th.free_text_shape_ratio * rows_total):
             return
         fams = await self._q(
             f"SELECT {fam_expr} AS fam, COUNT(*) FROM {fq} WHERE {q} IS NOT NULL "
-            f"GROUP BY 1 ORDER BY 2 DESC LIMIT {_TEMPLATE_FAMILIES}",
+            f"GROUP BY 1 ORDER BY 2 DESC LIMIT {th.template_families}",
             deadline,
         )
         covered = sum(int(c) for _, c in fams)
@@ -495,17 +494,18 @@ class SurveySourcesTool(Tool):
         Only repetitive phrasing qualifies -- free text masks to mostly unique
         templates and is skipped.
         """
-        if digit_rows < _TEMPLATE_MIN_ROWS:
+        th = self._profile.thresholds
+        if digit_rows < th.template_min_rows:
             return
         rows = await self._q(
             f"SELECT regexp_replace(CAST({q} AS VARCHAR), '[0-9]+([.,][0-9]+)*', 'N', 'g') AS tpl, "
             f"COUNT(*) FROM {fq} WHERE {q} IS NOT NULL AND "
             f"regexp_matches(CAST({q} AS VARCHAR), '[0-9]') "
-            f"GROUP BY 1 ORDER BY 2 DESC LIMIT {_TEMPLATE_FAMILIES}",
+            f"GROUP BY 1 ORDER BY 2 DESC LIMIT {th.template_families}",
             deadline,
         )
         covered = sum(int(c) for _, c in rows)
-        if not rows or covered < _TEMPLATE_MIN_COVERAGE * digit_rows:
+        if not rows or covered < th.template_min_coverage * digit_rows:
             return
         fams = "/".join(f"'{str(t)[:48]}'({c})" for t, c in rows)
         fact["number_in_text"] = f"{digit_rows} values carry numbers; families {fams}"
@@ -547,7 +547,7 @@ class SurveySourcesTool(Tool):
             return named, []
         groups: dict[str, list[tuple[str, str]]] = defaultdict(list)
         for entry in named:
-            for token in _tokens(entry[0]):
+            for token in self._name_tokens(entry[0]):
                 groups[token].append(entry)
         # Round-robin across stem groups rather than draining one: a group with
         # only one of its members profiled cannot be compared against anything,
@@ -568,7 +568,7 @@ class SurveySourcesTool(Tool):
     def _synonym_groups(self, facts: dict[str, dict]) -> list[tuple[str, list[str]]]:
         by_token: dict[str, list[str]] = defaultdict(list)
         for name in facts:
-            for token in _tokens(name):
+            for token in self._name_tokens(name):
                 by_token[token].append(name)
         groups = []
         seen: set[frozenset] = set()
@@ -603,7 +603,7 @@ class SurveySourcesTool(Tool):
                 if da == db or max(da, db) // max(min(da, db), 1) > 500:
                     continue
                 viable.append((a, b))
-        viable.sort(key=lambda p: 0 if _tokens(p[0]) & _tokens(p[1]) else 1)
+        viable.sort(key=lambda p: 0 if self._name_tokens(p[0]) & self._name_tokens(p[1]) else 1)
         lines: list[str] = []
         pairs = 0
         for a, b in viable:
@@ -632,7 +632,7 @@ class SurveySourcesTool(Tool):
             # A soft functional dependency marks one concept stored at two
             # grains; the mapping's violating values are real groups of the
             # finer grain, not noise -- deleting them changes the answer.
-            elif purity >= _NEAR_FD_PURITY:
+            elif purity >= self._profile.thresholds.near_fd_purity:
                 lines.append(
                     f'NEAR-HIERARCHY: "{parent}" ~ parent of "{child}" (purity {purity:.2f}; '
                     f"{viol} of {child_distinct} child values map to >1 parent). The grouping "
@@ -643,15 +643,16 @@ class SurveySourcesTool(Tool):
             # Same-concept names with a mid-range mapping are neither levels nor
             # aliases: they partition the rows differently, so which one the
             # question means changes the answer and no cleaning reconciles them.
-            elif _tokens(parent) & _tokens(child):
+            elif self._name_tokens(parent) & self._name_tokens(child):
+                note = self._profile.fragment("survey.cross_cutting_note")
                 lines.append(
                     f'CROSS-CUTTING: "{parent}" ({min(da, db)} distinct) and "{child}" '
                     f"({max(da, db)} distinct) name one concept but map {purity:.2f} pure -- NOT a "
                     "hierarchy and NOT aliases; they group the rows differently, so the answer "
                     "depends on which the question means. Compute both, deliver the one the "
                     "question's own wording names, and record the other's value in the "
-                    "adjudication; every distinct stored value is a real group of its column "
-                    "(code-shaped values included) and none may be dropped as dirty."
+                    "adjudication; every distinct stored value is a real group of its column"
+                    f"{note} and none may be dropped as dirty."
                 )
         return lines
 
@@ -666,4 +667,4 @@ def make_survey_sources_tool(ctx: PluginContext) -> Tool:
         kernel_python=config.get("kernel_python") or None,
         extension_dir=config.get("duckdb_extension_dir") or None,
     )
-    return SurveySourcesTool(session)
+    return SurveySourcesTool(session, profile=resolve_profile(config))

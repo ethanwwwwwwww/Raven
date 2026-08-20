@@ -105,6 +105,8 @@ class Kernel:
                     self.con.execute(f"ATTACH '{ref}' AS {alias} (TYPE postgres{ro})")
                 elif kind == "mongo":
                     notes.extend(self._materialize_mongo(alias, ref))
+                elif kind == "files":
+                    notes.extend(self._attach_files(alias, ref))
                 else:
                     notes.append(f"[ATTACH SKIPPED] {alias}: unsupported kind {kind!r}")
                 if kind in ("sqlite", "duckdb", "postgres"):
@@ -113,6 +115,122 @@ class Kernel:
                 notes.append(f"[ATTACH FAILED] {alias} ({kind}): {exc}")
         self.ns = {"con": self.con}
         return {"ok": True, "notes": notes}
+
+    def _attach_files(self, alias: str, ref: str) -> list[str]:
+        """Register plain data files (csv/tsv/parquet/json/xlsx) as views under
+        one schema, so a directory of file drops surveys and queries like any
+        attached store. ``ref`` is a single file, a directory (recursed), or a
+        glob pattern.
+
+        Each view is validated with a full COUNT at attach time -- a lazy view
+        whose parse error only fires mid-analysis is worse than a slow
+        bootstrap. CSVs that fail strict parsing degrade in order: latin-1
+        encoding, then ignore_errors; the degradation is always named in the
+        notes, because silently skipped lines are a population filter the
+        agent never chose.
+        """
+        import glob as globmod
+        from pathlib import Path
+
+        max_files = 64
+        detail_notes = 12
+        readers = {
+            ".csv": "read_csv_auto",
+            ".tsv": "read_csv_auto",
+            ".txt": "read_csv_auto",
+            ".parquet": "read_parquet",
+            ".json": "read_json_auto",
+            ".jsonl": "read_json_auto",
+            ".ndjson": "read_json_auto",
+            ".xlsx": "read_xlsx",
+        }
+        notes: list[str] = []
+        root = Path(ref)
+        if any(ch in ref for ch in "*?["):
+            files = sorted(Path(f) for f in globmod.glob(ref, recursive=True))
+        elif root.is_dir():
+            files = sorted(
+                f for f in root.rglob("*") if f.is_file() and not f.name.startswith(".")
+            )
+        else:
+            files = [root]
+        data_files = [f for f in files if f.suffix.lower() in readers]
+        if not data_files:
+            return [
+                f"[ATTACH FAILED] {alias} (files): no supported data files under {ref!r} "
+                f"(supported: {', '.join(sorted(readers))})"
+            ]
+        if len(data_files) > max_files:
+            notes.append(
+                f"{alias}: {len(data_files)} data files found, attaching the first "
+                f"{max_files}; narrow ref with a glob for the rest"
+            )
+            data_files = data_files[:max_files]
+        self.con.execute(f'CREATE SCHEMA IF NOT EXISTS "{alias}"')
+        seen: set[str] = set()
+        attached_quietly = 0
+        for f in data_files:
+            name = re.sub(r"\W+", "_", f.stem).strip("_").lower() or "file"
+            base, n = name, 2
+            while name in seen:
+                name = f"{base}_{n}"
+                n += 1
+            seen.add(name)
+            path_sql = str(f).replace("'", "''")
+            reader = readers[f.suffix.lower()]
+            if reader == "read_xlsx":
+                try:
+                    self.con.execute("LOAD excel")
+                except Exception:
+                    try:
+                        self.con.execute("INSTALL excel; LOAD excel;")
+                    except Exception as exc:
+                        notes.append(
+                            f"[ATTACH FAILED] {alias}.{name} ({f.name}): excel extension "
+                            f"unavailable: {exc}"
+                        )
+                        continue
+            attempts = [f"{reader}('{path_sql}')"]
+            if reader == "read_csv_auto":
+                attempts += [
+                    f"read_csv_auto('{path_sql}', encoding='latin-1')",
+                    f"read_csv_auto('{path_sql}', ignore_errors=true)",
+                    f"read_csv_auto('{path_sql}', encoding='latin-1', ignore_errors=true)",
+                ]
+            last_err = None
+            for expr in attempts:
+                try:
+                    self.con.execute(
+                        f'CREATE OR REPLACE VIEW "{alias}"."{name}" AS SELECT * FROM {expr}'
+                    )
+                    count = self.con.execute(
+                        f'SELECT COUNT(*) FROM "{alias}"."{name}"'
+                    ).fetchone()[0]
+                    note = f"attached {alias}.{name} from {f.name}: {count} rows"
+                    if "ignore_errors" in expr:
+                        note += (
+                            " (malformed lines skipped -- row loss possible, verify the "
+                            "count against the raw file)"
+                        )
+                    elif "latin-1" in expr:
+                        note += " (latin-1 fallback encoding)"
+                    if len(notes) < detail_notes or "skipped" in note:
+                        notes.append(note)
+                    else:
+                        attached_quietly += 1
+                    last_err = None
+                    break
+                except Exception as exc:
+                    last_err = exc
+            if last_err is not None:
+                try:
+                    self.con.execute(f'DROP VIEW IF EXISTS "{alias}"."{name}"')
+                except Exception:
+                    pass
+                notes.append(f"[ATTACH FAILED] {alias}.{name} ({f.name}): {last_err}")
+        if attached_quietly:
+            notes.append(f"attached {attached_quietly} further {alias}.* views (clean parses)")
+        return notes
 
     def _materialize_mongo(self, alias: str, uri: str) -> list[str]:
         """Copy every collection of a mongo db into ``<alias>.<collection>`` tables.

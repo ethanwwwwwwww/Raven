@@ -13,8 +13,12 @@ import pytest
 
 from raven.plugin.context import PluginContext, ServiceLocator
 from raven.plugin.data_agent import tools as dat
+from raven.plugin.data_agent.calibration import GENERAL, STRICT, apply_overrides, resolve_profile
 from raven.plugin.data_agent.session import DataAgentSession, SourceSpec
 from raven.plugin.data_agent.sqlgate import SqlRejectedError, ensure_read_only, wrap_with_cap
+
+# Survey census tests use small fixtures; the shipped row floor targets real tables.
+_LOW_ROWS = apply_overrides(GENERAL, {"thresholds": {"template_min_rows": 6}})
 
 
 @pytest.fixture
@@ -30,8 +34,8 @@ def stores(tmp_path):
     con = duckdb.connect()
     con.execute("INSTALL sqlite_scanner; LOAD sqlite_scanner;")
     con.execute(f"ATTACH '{meta}' AS m (TYPE sqlite)")
-    con.execute("CREATE TABLE m.books (book_id VARCHAR, rating VARCHAR)")
-    # rating mixes numbers and a sentinel; book_id is prefixed differently from book_ref
+    con.execute("CREATE TABLE m.books (book_id VARCHAR, grade VARCHAR)")
+    # grade mixes numbers and a sentinel; book_id is prefixed differently from book_ref
     con.execute("INSERT INTO m.books VALUES ('bid_1','5'),('bid_2','NA'),('bid_3','4')")
     con.close()
     return sales, meta
@@ -108,7 +112,7 @@ async def test_sql_empty_result_note(session):
 
 async def test_profile_flags_sentinel_and_type_mix(session):
     tool = dat.ProfileTool(session)
-    out = await tool.execute("meta.books", column="rating")
+    out = await tool.execute("meta.books", column="grade")
     assert "SENTINEL?" in out  # 'NA' surfaces
     assert "MIXED-TYPE?" in out  # '5','4' numeric but 'NA' not
 
@@ -178,7 +182,7 @@ def test_parse_sources_reads_sources_file(tmp_path):
 
     from raven.plugin.data_agent.session import parse_sources
 
-    manifest = tmp_path / "dab_sources.json"
+    manifest = tmp_path / "sources.json"
     manifest.write_text(json.dumps([{"alias": "meta", "kind": "sqlite", "path": "/dab/data/m.db"}]))
     specs = parse_sources({"sources": [{"alias": "a", "kind": "duckdb", "path": "/x.duckdb"}], "sources_file": str(manifest)})
     assert [s.alias for s in specs] == ["a", "meta"]
@@ -322,9 +326,9 @@ async def test_resolve_entities_clusters_variants(session):
 
     rows = []
     for v, n in [
-        ("Zo gaat het leven aan je voor", 3),
-        ("zo gaat het leven aan je vóór", 2),
-        ("Zo gaat het leven aan je vor", 1),
+        ("Silver Harbor Nights", 3),
+        ("silver harbor níghts", 2),
+        ("Silver Harbor Nigts", 1),
         ("Completely Different Song", 4),
     ]:
         rows.extend([[f"{v}-{i}", v] for i in range(n)])
@@ -340,7 +344,7 @@ async def test_resolve_entities_clusters_variants(session):
     )
     # The most frequent original spelling wins the canonical slot, and the
     # merged entity aggregates all 6 plays vs 4 for the unrelated song.
-    assert "Zo gaat het leven aan je voor" in joined and "6" in joined
+    assert "Silver Harbor Nights" in joined and "6" in joined
 
 
 async def test_resolve_entities_threshold_and_rejection(session):
@@ -382,10 +386,10 @@ async def test_resolve_entities_merges_decorated_variants(session):
     rows = []
     for i, v in enumerate(
         [
-            "Zo gaat het leven aan je voor",
-            "Zo gaat het leven aan je voor (Hillich fjoer | Heilig vuur)",
-            "006-Zo gaat het leven aan je voor",
-            "Syb van der Ploeg - Zo gaat het leven aan je voor",
+            "The River Runs Through Winter Fields",
+            "The River Runs Through Winter Fields (Wide mix | Alt take)",
+            "006-The River Runs Through Winter Fields",
+            "Arn Voss - The River Runs Through Winter Fields",
             "Completely Different Song",
             "Love",
             "Love Story",
@@ -640,7 +644,7 @@ async def test_submit_answer_refuses_hollow_adjudication(tmp_path):
 async def test_submit_answer_requires_numbers_when_adjudicating(tmp_path):
     from raven.plugin.data_agent.deliver import SubmitAnswerTool
 
-    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"))
+    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"), profile=STRICT)
     out = await tool.execute(
         rows=["ka0X"],
         selected_reading="quantity-tier reading of the discount policy",
@@ -672,7 +676,7 @@ async def test_submit_answer_requires_numbers_when_adjudicating(tmp_path):
 async def test_submit_answer_requires_computed_rejected_readings(tmp_path):
     from raven.plugin.data_agent.deliver import SubmitAnswerTool
 
-    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"))
+    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"), profile=STRICT)
     base = dict(
         rows=["a", "b", "c"],
         selected_reading="entity-weighted count over resolved names",
@@ -695,7 +699,7 @@ async def test_submit_answer_requires_computed_rejected_readings(tmp_path):
 async def test_submit_answer_nudges_single_value_no_alternatives_once(tmp_path):
     from raven.plugin.data_agent.deliver import SubmitAnswerTool
 
-    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"))
+    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"), profile=STRICT)
     kwargs = dict(
         rows=["7"],
         selected_reading="calendar-year window, inclusive bounds",
@@ -707,7 +711,7 @@ async def test_submit_answer_nudges_single_value_no_alternatives_once(tmp_path):
     assert "wrote 1 rows" in out
 
     # Providing computed alternatives up front skips the nudge entirely.
-    fresh = SubmitAnswerTool(answer_path=str(tmp_path / "a2.txt"))
+    fresh = SubmitAnswerTool(answer_path=str(tmp_path / "a2.txt"), profile=STRICT)
     out = await fresh.execute(
         rows=["7"],
         selected_reading="calendar-year window, inclusive bounds",
@@ -735,13 +739,13 @@ def test_submit_answer_contract_carries_delivery_rules():
 async def test_submit_answer_refuses_for_each_shortfall_once(tmp_path):
     from raven.plugin.data_agent.deliver import SubmitAnswerTool
 
-    q = tmp_path / "dab_question.txt"
+    q = tmp_path / "question.txt"
     q.write_text("What is the best year for each CPC group at level 4?")
     tool = SubmitAnswerTool(
-        answer_path=str(tmp_path / "answer.txt"), question_path=str(q)
+        answer_path=str(tmp_path / "answer.txt"), question_path=str(q), profile=STRICT
     )
     kwargs = dict(
-        rows=["A61 2016", "H04 2015"],
+        rows=["A61 1963", "H04 1964"],
         selected_reading="best filing year per level-4 CPC class",
         reason="EMA per class over 23 level-4 classes computed from 46 primary code pairs",
     )
@@ -756,7 +760,7 @@ async def test_submit_answer_refuses_for_each_shortfall_once(tmp_path):
     assert "wrote 2 rows" in out
 
     scalar = SubmitAnswerTool(
-        answer_path=str(tmp_path / "a2.txt"), question_path=str(q)
+        answer_path=str(tmp_path / "a2.txt"), question_path=str(q), profile=STRICT
     )
     out = await scalar.execute(
         rows=["r1", "r2", "r3"],
@@ -768,6 +772,7 @@ async def test_submit_answer_refuses_for_each_shortfall_once(tmp_path):
     noq = SubmitAnswerTool(
         answer_path=str(tmp_path / "a3.txt"),
         question_path=str(tmp_path / "missing.txt"),
+        profile=STRICT,
     )
     nkw = dict(
         rows=["42"],
@@ -818,10 +823,10 @@ async def test_survey_sources_flags_list_valued_columns(session, tmp_path, monke
         "business",
         ["name", "categories"],
         [
-            ["Cafe One", "Restaurants, Breakfast & Brunch, Cafes"],
-            ["Cafe Two", "Restaurants, Coffee & Tea"],
-            ["Bar Three", "Nightlife, Bars"],
-            ["Solo Deli", "Delis"],
+            ["Shop One", "Hardware, Tools & Supplies, Fasteners"],
+            ["Shop Two", "Hardware, Paint & Coatings"],
+            ["Shop Three", "Garden, Outdoor Living"],
+            ["Solo Kiosk", "Lumber"],
         ],
     )
     out = await SurveySourcesTool(session).execute()
@@ -866,15 +871,15 @@ async def test_survey_sources_detects_hierarchy_and_join_candidates(session, tmp
 
     monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
     session.put_rows(
-        "repos_catalog",
-        ["org_name", "repo_name"],
+        "projects_catalog",
+        ["org_name", "project_name"],
         [["acme", "acme/a"], ["acme", "acme/b"], ["zeta", "zeta/x"], ["zeta", "zeta/y"], ["zeta", "zeta/z"]],
     )
-    session.put_rows("stars", ["repo_name", "star_total"], [["acme/a", "10"], ["zeta/x", "7"]])
+    session.put_rows("stars", ["project_name", "star_total"], [["acme/a", "10"], ["zeta/x", "7"]])
     out = await SurveySourcesTool(session).execute()
     notes = (tmp_path / "survey.md").read_text()
     assert "HIERARCHY" in notes and "org_name" in notes
-    assert "JOIN CANDIDATE" in notes and "repo_name" in notes
+    assert "JOIN CANDIDATE" in notes and "project_name" in notes
     assert "surveyed" in out
 
 
@@ -883,7 +888,6 @@ async def test_survey_template_census_names_phrasing_families(session, tmp_path,
     from raven.plugin.data_agent.survey import SurveySourcesTool
 
     monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
-    monkeypatch.setattr(survey_mod, "_TEMPLATE_MIN_ROWS", 6)
     rows = (
         [[f"downloaded {i * 7} times"] for i in range(1, 5)]
         + [[f"{i * 3} downloads this week"] for i in range(1, 4)]
@@ -896,7 +900,7 @@ async def test_survey_template_census_names_phrasing_families(session, tmp_path,
         ["txt"],
         [[f"met client {i} at venue {chr(65 + i)} discussing item {i * i}"] for i in range(12)],
     )
-    out = await SurveySourcesTool(session).execute()
+    out = await SurveySourcesTool(session, profile=_LOW_ROWS).execute()
     assert 'NUMBER-IN-TEXT column "stats_text"' in out
     assert "downloaded N times" in out and "N downloads this week" in out
     assert "cover EVERY family" in out
@@ -973,8 +977,15 @@ async def test_survey_flags_cross_cutting_same_concept_columns(session, tmp_path
     out = await SurveySourcesTool(session).execute()
     assert "CROSS-CUTTING" in out
     assert "NOT a hierarchy and NOT aliases" in out
-    assert "code-shaped values included" in out
+    assert "real group of its column and none may be dropped" in out
     assert "NEAR-HIERARCHY" not in out
+
+    # A deployment can splice a note into the line through the fragment slot.
+    noted = apply_overrides(
+        GENERAL, {"fragments": {"survey.cross_cutting_note": " (odd-shaped values too)"}}
+    )
+    out = await SurveySourcesTool(session, profile=noted).execute()
+    assert "real group of its column (odd-shaped values too) and none" in out
 
 
 async def test_survey_reports_phrasing_families_in_free_text(session, tmp_path, monkeypatch):
@@ -982,7 +993,6 @@ async def test_survey_reports_phrasing_families_in_free_text(session, tmp_path, 
     from raven.plugin.data_agent.survey import SurveySourcesTool
 
     monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
-    monkeypatch.setattr(survey_mod, "_TEMPLATE_MIN_ROWS", 6)
     # One subject written three ways: a pattern matching one shape drops the rest.
     rows = []
     for i in range(4):
@@ -992,7 +1002,7 @@ async def test_survey_reports_phrasing_families_in_free_text(session, tmp_path, 
     for i in range(4):
         rows.append([f"Subject SUBJ-{i:03d}, registered under UUID 9c8d7e6f-22-{i}, belongs to the Alpha study cohort."])
     session.put_rows("subjects", ["subject_note"], rows)
-    out = await SurveySourcesTool(session).execute()
+    out = await SurveySourcesTool(session, profile=_LOW_ROWS).execute()
     assert 'PHRASING FAMILIES in free-text column "subject_note"' in out
     assert "must match EVERY shape" in out
     assert "3 distinct shapes over 12 rows" in out
@@ -1003,9 +1013,8 @@ async def test_survey_skips_phrasing_families_for_short_values(session, tmp_path
     from raven.plugin.data_agent.survey import SurveySourcesTool
 
     monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
-    monkeypatch.setattr(survey_mod, "_TEMPLATE_MIN_ROWS", 6)
     session.put_rows("codes", ["state"], [[f"state_{i % 4}"] for i in range(12)])
-    out = await SurveySourcesTool(session).execute()
+    out = await SurveySourcesTool(session, profile=_LOW_ROWS).execute()
     assert "PHRASING FAMILIES" not in out
 
 
@@ -1014,7 +1023,6 @@ async def test_survey_skips_phrasing_families_for_free_text(session, tmp_path, m
     from raven.plugin.data_agent.survey import SurveySourcesTool
 
     monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
-    monkeypatch.setattr(survey_mod, "_TEMPLATE_MIN_ROWS", 6)
     # Genuinely free text: about as many shapes as rows, so a shape census would
     # be noise. Measured on real document columns, which sit near a 1:1 ratio.
     rows = [
@@ -1022,7 +1030,7 @@ async def test_survey_skips_phrasing_families_for_free_text(session, tmp_path, m
         for i in range(40)
     ]
     session.put_rows("docs", ["body"], rows)
-    out = await SurveySourcesTool(session).execute()
+    out = await SurveySourcesTool(session, profile=_LOW_ROWS).execute()
     assert "PHRASING FAMILIES" not in out
 
 
@@ -1030,7 +1038,7 @@ async def test_submit_answer_requires_measured_self_imposed_exclusions(tmp_path)
     from raven.plugin.data_agent.deliver import SubmitAnswerTool
     import json as _json
 
-    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"))
+    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"), profile=STRICT)
     base = dict(
         rows=["alpha 9", "beta 8", "gamma 7", "delta 6", "epsilon 5"],
         selected_reading="rank entries by the stored score, all entries eligible",
@@ -1077,3 +1085,227 @@ def test_submit_answer_contract_separates_membership_from_completeness():
     assert "does not travel to any other column" in desc
     assert "Membership comes from the table the question points at" in desc
     assert "completeness opinion" in desc
+
+
+# ---- calibration profiles ----
+
+async def test_submit_answer_general_profile_warns_and_writes(tmp_path):
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+
+    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"))
+    kwargs = dict(
+        rows=["7"],
+        selected_reading="calendar-year window, inclusive bounds",
+        reason="COUNT over the full filtered population for 2019, one aggregate over 8140 rows",
+    )
+    out = await tool.execute(**kwargs)
+    assert "wrote 1 rows" in out and "[ADVISORY]" in out
+    assert "reading families" in out and "REFUSED" not in out
+    assert (tmp_path / "answer.txt").read_text() == "7\n"
+    out = await tool.execute(**kwargs)
+    assert "[ADVISORY]" not in out
+
+
+async def test_submit_answer_gate_off_is_silent(tmp_path):
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+
+    off = apply_overrides(GENERAL, {"gates": {"single_reading": "off"}})
+    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"), profile=off)
+    out = await tool.execute(
+        rows=["7"],
+        selected_reading="calendar-year window, inclusive bounds",
+        reason="COUNT over the full filtered population for 2019, one aggregate over 8140 rows",
+    )
+    assert "wrote 1 rows" in out and "ADVISORY" not in out
+
+
+def test_calibration_resolve_profile_layers(tmp_path):
+    p = resolve_profile({})
+    assert p.name == "general" and p.gate_mode("single_reading") == "warn"
+    p = resolve_profile({"profile": "strict"})
+    assert p.gate_mode("single_reading") == "refuse" and p.gate_mode("for_each") == "refuse"
+
+    pack = tmp_path / "pack.yaml"
+    pack.write_text(
+        "profile_overrides:\n"
+        "  name: pack\n"
+        "  gates: {single_reading: refuse}\n"
+        "  thresholds: {template_min_rows: 6}\n"
+        "  lexicons:\n"
+        "    extra_sentinels: ['1.23E45']\n"
+        "    extra_placeholders: ['voidmark']\n"
+        "  fragments:\n"
+        "    profile.sentinel_examples: 'AA, BB'\n",
+        encoding="utf-8",
+    )
+    p = resolve_profile(
+        {"profile_file": str(pack), "profile_overrides": {"gates": {"for_each": "off"}}}
+    )
+    assert p.name == "pack"
+    assert p.gate_mode("single_reading") == "refuse"
+    assert p.gate_mode("for_each") == "off"
+    assert "1.23e45" in p.lexicons.sentinel_values()
+    assert "voidmark" in p.lexicons.placeholder_values()
+    assert p.thresholds.template_min_rows == 6
+    assert p.fragment("profile.sentinel_examples") == "AA, BB"
+
+    with pytest.raises(ValueError):
+        apply_overrides(GENERAL, {"bogus": {}})
+    with pytest.raises(ValueError):
+        apply_overrides(GENERAL, {"gates": {"no_such_gate": "warn"}})
+    with pytest.raises(ValueError):
+        apply_overrides(GENERAL, {"gates": {"for_each": "loud"}})
+    with pytest.raises(ValueError):
+        apply_overrides(GENERAL, {"thresholds": {"no_such_knob": 1}})
+    with pytest.raises(ValueError):
+        apply_overrides(GENERAL, {"lexicons": {"sentinels": ["x"]}})
+    with pytest.raises(ValueError):
+        resolve_profile({"profile": "no_such_profile"})
+
+
+async def test_profile_tool_lexicon_extras_and_fragment(session):
+    session.put_rows(
+        "marks", ["grade"], [["zz-void"], ["zz-void"], ["good"], ["fine"]]
+    )
+    plain = await dat.ProfileTool(session).execute("marks", column="grade")
+    assert "SENTINEL?" not in plain
+    prof = apply_overrides(
+        GENERAL,
+        {
+            "lexicons": {"extra_sentinels": ["ZZ-VOID"]},
+            "fragments": {"profile.sentinel_examples": "AA, BB"},
+        },
+    )
+    tool = dat.ProfileTool(session, profile=prof)
+    assert "sentinel values (AA, BB)" in tool.description
+    out = await tool.execute("marks", column="grade")
+    assert "SENTINEL?" in out and "zz-void" in out
+
+
+async def test_profile_tool_flags_repeated_extreme_constant(session):
+    rows = [["-999"]] * 5 + [[str(i)] for i in range(1, 25)]
+    session.put_rows("sensor", ["reading"], rows)
+    out = await dat.ProfileTool(session).execute("sensor", column="reading")
+    assert "REPEATED-EXTREME?" in out and "x5" in out
+    session.put_rows("sensor_ok", ["reading"], [[str(i)] for i in range(1, 31)])
+    ok = await dat.ProfileTool(session).execute("sensor_ok", column="reading")
+    assert "REPEATED-EXTREME?" not in ok
+
+
+async def test_resolve_entities_bracketed_values_never_merge(session):
+    from raven.plugin.data_agent.entity_resolution import ResolveEntitiesTool
+
+    session.put_rows(
+        "takes",
+        ["title"],
+        [["[Void Take]"], ["[Void Take]"], ["Void Take"], ["void take"]],
+    )
+    tool = ResolveEntitiesTool(session)
+    out = await tool.execute(table="takes", column="title", output_table="take_map")
+    assert "3 distinct values -> 2 entities" in out
+    assert "look like null placeholders" in out
+
+
+async def test_resolve_entities_bracket_feature_pins_old_semantics(session):
+    from raven.plugin.data_agent.entity_resolution import ResolveEntitiesTool
+
+    session.put_rows(
+        "takes_pinned",
+        ["title"],
+        [["[Void Take]"], ["[Void Take]"], ["Void Take"], ["void take"]],
+    )
+    pinned = apply_overrides(GENERAL, {"features": {"bracketed_placeholders": False}})
+    tool = ResolveEntitiesTool(session, profile=pinned)
+    out = await tool.execute(table="takes_pinned", column="title", output_table="pin_map")
+    # With the structural rule off, the bracketed spelling shares its
+    # normalized key with the plain ones and merges as it did pre-R28.
+    assert "3 distinct values -> 1 entities" in out
+
+
+async def test_profile_repeated_extreme_feature_switch(session):
+    rows = [["-999"]] * 5 + [[str(i)] for i in range(1, 25)]
+    session.put_rows("sensor_pinned", ["reading"], rows)
+    pinned = apply_overrides(GENERAL, {"features": {"repeated_extreme": False}})
+    out = await dat.ProfileTool(session, profile=pinned).execute(
+        "sensor_pinned", column="reading"
+    )
+    assert "REPEATED-EXTREME?" not in out
+
+
+# ---- files source kind ----
+
+async def test_files_source_registers_views_and_joins(stores, tmp_path):
+    sales, _ = stores
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    (drop / "orders extra.csv").write_text(
+        "order_id,region\n1,east\n2,west\n3,east\n", encoding="utf-8"
+    )
+    (drop / "notes.jsonl").write_text('{"k": 1, "v": "a"}\n{"k": 2, "v": "b"}\n', encoding="utf-8")
+    (drop / "readme.md").write_text("not data", encoding="utf-8")
+    session = DataAgentSession(
+        workspace=tmp_path,
+        sources=(
+            SourceSpec(alias="sales", kind="duckdb", ref=str(sales)),
+            SourceSpec(alias="inbox", kind="files", ref=str(drop)),
+        ),
+    )
+    out = await dat.SqlTool(session).execute("SELECT COUNT(*) AS n FROM inbox.orders_extra")
+    assert "attached inbox.orders_extra" in out and "3 rows" in out
+    assert "attached inbox.notes" in out
+    assert "readme" not in out
+    joined = await dat.SqlTool(session).execute(
+        "SELECT COUNT(*) AS n FROM sales.orders o JOIN inbox.orders_extra e "
+        "ON o.order_id = e.order_id"
+    )
+    assert "rows=1" in joined and "3" in joined
+
+
+async def test_files_source_is_visible_to_survey(tmp_path, monkeypatch):
+    from raven.plugin.data_agent import survey as survey_mod
+    from raven.plugin.data_agent.survey import SurveySourcesTool
+
+    monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    (drop / "stock.csv").write_text(
+        "sku,qty\n" + "".join(f"s{i},{i * 3}\n" for i in range(8)), encoding="utf-8"
+    )
+    session = DataAgentSession(
+        workspace=tmp_path, sources=(SourceSpec(alias="inbox", kind="files", ref=str(drop)),)
+    )
+    out = await SurveySourcesTool(session).execute()
+    assert "stock" in out and "8 rows" in out
+
+
+async def test_files_source_degrades_on_malformed_csv(tmp_path):
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    # Invalid UTF-8 (a latin-1 byte): the strict attempt fails and the ladder
+    # falls through to the latin-1 encoding, named in the attach note.
+    (drop / "legacy.csv").write_bytes(b"name,val\ncaf\xe9,1\nbar,2\n")
+    (drop / "ragged.csv").write_text("a,b\n1,2\n3,4,5\n6,7\n", encoding="utf-8")
+    session = DataAgentSession(
+        workspace=tmp_path, sources=(SourceSpec(alias="inbox", kind="files", ref=str(drop)),)
+    )
+    out = await dat.SqlTool(session).execute("SELECT COUNT(*) FROM inbox.legacy")
+    assert "attached inbox.legacy" in out and "latin-1 fallback" in out
+    assert "attached inbox.ragged" in out
+
+
+async def test_files_source_reports_unsupported_dir(tmp_path):
+    drop = tmp_path / "drop"
+    drop.mkdir()
+    (drop / "readme.md").write_text("nothing tabular", encoding="utf-8")
+    session = DataAgentSession(
+        workspace=tmp_path, sources=(SourceSpec(alias="inbox", kind="files", ref=str(drop)),)
+    )
+    out = await dat.SqlTool(session).execute("SELECT 1")
+    assert "no supported data files" in out
+
+
+def test_parse_sources_accepts_files_kind(tmp_path):
+    from raven.plugin.data_agent.session import parse_sources
+
+    specs = parse_sources({"sources": [{"alias": "inbox", "kind": "files", "path": "/data/drop"}]})
+    assert specs[0].kind == "files" and specs[0].ref == "/data/drop"

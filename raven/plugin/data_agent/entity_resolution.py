@@ -23,6 +23,7 @@ from typing import Any
 
 from raven.agent.tools.base import Tool
 from raven.plugin.context import PluginContext
+from raven.plugin.data_agent.calibration import GENERAL, DataAgentProfile, resolve_profile
 from raven.plugin.data_agent.session import DataAgentSession
 from raven.plugin.data_agent.sqlgate import SqlRejectedError, ensure_read_only
 
@@ -36,8 +37,13 @@ class ResolveEntitiesTool(Tool):
 
     timeout_seconds = 600.0
 
-    def __init__(self, session: DataAgentSession) -> None:
+    def __init__(self, session: DataAgentSession, profile: DataAgentProfile | None = None) -> None:
         self._session = session
+        prof = profile or GENERAL
+        self._na_keys = frozenset(
+            _normalize(v) for v in prof.lexicons.placeholder_values()
+        )
+        self._bracketed = prof.features.bracketed_placeholders
 
     @property
     def name(self) -> str:
@@ -117,7 +123,7 @@ class ResolveEntitiesTool(Tool):
         if not pairs:
             return "[RESOLVE_ENTITIES] source query returned 0 values; nothing to resolve."
 
-        clusters = _cluster(pairs, ratio)
+        clusters = _cluster(pairs, ratio, self._na_keys, self._bracketed)
         out_rows = []
         merged_clusters = 0
         examples: list[str] = []
@@ -138,7 +144,11 @@ class ResolveEntitiesTool(Tool):
         if not put.get("ok"):
             return f"[RESOLVE_ENTITIES ERROR] materializing {output_table} failed: {put.get('error')}"
 
-        placeholders = sum(1 for v, _ in pairs if _is_placeholder(_normalize(v)) or not _normalize(v))
+        placeholders = sum(
+            1
+            for v, _ in pairs
+            if _is_placeholder(v, _normalize(v), self._na_keys, self._bracketed) or not _normalize(v)
+        )
         placeholder_note = (
             f"\n{placeholders} value(s) look like null placeholders (unknown/untitled/n.a./digits-only); "
             "they were never merged and are missing data, not entities -- exclude them from rankings."
@@ -166,29 +176,34 @@ def _normalize(value: str) -> str:
     return " ".join(sorted(tokens))
 
 
-# Null-equivalent placeholder spellings (pandas na_values plus the catalog staples).
-# A placeholder repeated across records is missing data, not one entity: merging
-# every 'unknown' would fabricate a giant top-ranked pseudo-entity out of thin air.
-_NA_VALUES = (
-    "", "n/a", "na", "n.a.", "null", "none", "nil", "nan", "n.d.", "nd", "tbd", "tba",
-    "unknown", "untitled", "[untitled]", "unnamed", "no title", "not available",
-    "missing", "misc", "other", "others", "various", "unk", "unk.", "[silence]", "-",
-)
-_NA_KEYS = frozenset(_normalize(v) for v in _NA_VALUES)
+# A placeholder repeated across records is missing data, not one entity:
+# merging every 'unknown' would fabricate a giant top-ranked pseudo-entity out
+# of thin air. The spelling list lives in calibration.Lexicons (cross-domain
+# conventions only); a value written entirely inside square brackets is an
+# annotation by structure, whatever the words inside are.
+_BRACKETED_RE = re.compile(r"^\s*\[.*\]\s*$")
 
 _CONTAIN_MIN_TOKENS = 4
 _CONTAIN_BUCKET_CAP = 50
 
 
-def _is_placeholder(key: str) -> bool:
-    """Normalized keys that denote missing data (or are digits-only labels)."""
-    if key in _NA_KEYS:
+def _is_placeholder(raw: str, key: str, na_keys: frozenset[str], bracketed: bool = True) -> bool:
+    """Values that denote missing data: bracketed annotations by structure,
+    null-equivalent spellings by lexicon, and digits-only labels."""
+    if bracketed and _BRACKETED_RE.match(raw):
+        return True
+    if key in na_keys:
         return True
     tokens = key.split()
     return bool(tokens) and all(t.isdigit() for t in tokens)
 
 
-def _cluster(pairs: list[tuple[str, int]], threshold: float) -> list[tuple[str, list[tuple[str, int]]]]:
+def _cluster(
+    pairs: list[tuple[str, int]],
+    threshold: float,
+    na_keys: frozenset[str],
+    bracketed: bool = True,
+) -> list[tuple[str, list[tuple[str, int]]]]:
     """Union-find clustering: exact normalized blocks + sorted-neighborhood fuzzy merge."""
     values = [v for v, _ in pairs]
     parent = list(range(len(values)))
@@ -211,7 +226,7 @@ def _cluster(pairs: list[tuple[str, int]], threshold: float) -> list[tuple[str, 
     # the merge passes below also skip.
     raw_keys = [_normalize(v) for v in values]
     normalized = [
-        key if key and not _is_placeholder(key) else f"\x00{v}"
+        key if key and not _is_placeholder(v, key, na_keys, bracketed) else f"\x00{v}"
         for key, v in zip(raw_keys, values)
     ]
     blocks: dict[str, int] = {}
@@ -281,4 +296,4 @@ def make_resolve_entities_tool(ctx: PluginContext) -> Tool:
         kernel_python=config.get("kernel_python") or None,
         extension_dir=config.get("duckdb_extension_dir") or None,
     )
-    return ResolveEntitiesTool(session)
+    return ResolveEntitiesTool(session, profile=resolve_profile(config))
