@@ -576,3 +576,69 @@ class TestStoreRejectsPerCallScope:
             metadata={"is_final": True},
         )
         assert adapter.memorize_calls[0]["is_final"] is True
+
+
+class TestUnprocessedTailConversion:
+    """A session-pinned search returns the unextracted buffer tail in
+    ``unprocessed_messages``. The converter must surface it: extraction lags
+    the conversation, so pre-extraction recall on a real server is ONLY the
+    tail -- dropping it made recall silently empty (measured on 1.1.3)."""
+
+    @staticmethod
+    def _data(msgs: list) -> SimpleNamespace:
+        return SimpleNamespace(
+            episodes=[], profiles=[], agent_cases=[], agent_skills=[],
+            unprocessed_messages=msgs,
+        )
+
+    @staticmethod
+    def _msg(i: int, role: str = "user", content: object = None) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=f"m{i}", session_id="cli:s1", role=role,
+            content=f"fact number {i}" if content is None else content,
+        )
+
+    def test_tail_becomes_memories(self) -> None:
+        out = EverosBackend._search_data_to_memories(
+            self._data([self._msg(1), self._msg(2, role="assistant")]), "user"
+        )
+        assert [m.text for m in out] == ["fact number 1", "fact number 2"]
+        assert all(m.metadata["type"] == "unprocessed" for m in out)
+        assert out[0].metadata["session_id"] == "cli:s1"
+
+    def test_tool_messages_are_skipped(self) -> None:
+        out = EverosBackend._search_data_to_memories(
+            self._data([self._msg(1, role="tool"), self._msg(2)]), "user"
+        )
+        assert [m.text for m in out] == ["fact number 2"]
+
+    def test_tail_is_bounded_to_the_most_recent(self) -> None:
+        out = EverosBackend._search_data_to_memories(
+            self._data([self._msg(i) for i in range(25)]), "user"
+        )
+        assert len(out) == 10
+        assert out[0].text == "fact number 15"  # oldest surviving = last 10
+        assert out[-1].text == "fact number 24"
+
+    def test_each_message_text_is_capped(self) -> None:
+        out = EverosBackend._search_data_to_memories(
+            self._data([self._msg(1, content="x" * 2000)]), "user"
+        )
+        assert len(out[0].text) == 500
+
+    def test_multimodal_content_keeps_text_items(self) -> None:
+        content = [
+            SimpleNamespace(type="text", text="part one"),
+            SimpleNamespace(type="image_url", image_url="http://x"),
+            SimpleNamespace(type="text", text="part two"),
+        ]
+        out = EverosBackend._search_data_to_memories(
+            self._data([self._msg(1, content=content)]), "user"
+        )
+        assert out[0].text == "part one\npart two"
+
+    def test_agent_track_ignores_the_tail(self) -> None:
+        out = EverosBackend._search_data_to_memories(
+            self._data([self._msg(1)]), "agent"
+        )
+        assert out == []

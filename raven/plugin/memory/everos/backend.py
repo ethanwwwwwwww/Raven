@@ -104,6 +104,26 @@ class _NoOpAdapter:
 # ---------------------------------------------------------------------------
 
 
+# Bounds for flattening the unextracted buffer tail into recall hits: one
+# long turn must not flood the # Memory segment (the renderer adds bullets
+# verbatim, without truncation).
+_TAIL_MAX_MESSAGES = 10
+_TAIL_MAX_CHARS = 500
+
+
+def _tail_text(content: Any) -> str:
+    """Text of one buffered message: the string form, or the joined text
+    items of the multi-modal list form (non-text parts are dropped)."""
+    if isinstance(content, str):
+        return content.strip()
+    parts: list[str] = []
+    for item in content or []:
+        t = item.get("text") if isinstance(item, dict) else getattr(item, "text", None)
+        if isinstance(t, str) and t.strip():
+            parts.append(t.strip())
+    return "\n".join(parts)
+
+
 def _jsonify(obj: Any) -> Any:
     """Recursively turn parsed-JSON ``dict`` / ``list`` trees into
     nested :class:`SimpleNamespace` so the host's existing attribute-
@@ -565,6 +585,37 @@ class EverosBackend:
                         metadata={
                             "id": prof.id,
                             "type": "profile",
+                            "owner_type": "user",
+                        },
+                    )
+                )
+            # The unextracted buffer tail: raw messages still in the
+            # boundary-detection buffer, returned only for a session-pinned
+            # search. Extraction lags the conversation (hosted ingestion is
+            # asynchronous; the bundled server extracts on flush/boundary),
+            # so for a session-scoped run this tail IS the memory of what
+            # just happened -- dropping it made pre-extraction recall
+            # silently empty against a real server (measured on 1.1.3).
+            # Tool messages are skipped (bulk, low fact density); the tail
+            # is bounded because the renderer adds bullets verbatim.
+            tail = [
+                m
+                for m in (getattr(data, "unprocessed_messages", None) or [])
+                if getattr(m, "role", None) in ("user", "assistant")
+            ]
+            for msg in tail[-_TAIL_MAX_MESSAGES:]:
+                text = _tail_text(getattr(msg, "content", ""))
+                if not text:
+                    continue
+                out.append(
+                    Memory(
+                        text=text[:_TAIL_MAX_CHARS],
+                        score=0.0,
+                        metadata={
+                            "id": getattr(msg, "id", None),
+                            "session_id": getattr(msg, "session_id", None),
+                            "type": "unprocessed",
+                            "role": msg.role,
                             "owner_type": "user",
                         },
                     )
