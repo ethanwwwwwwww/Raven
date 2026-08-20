@@ -530,6 +530,24 @@ async def test_verify_join_detects_prefix_mismatch(session):
     assert "match_rate=0" not in fixed.split("VERDICT")[0].split("match_rate=")[1][:5]
 
 
+async def test_verify_join_normalization_probe_and_unmatched_sample(session):
+    session.put_rows(
+        "jleft", ["k", "v"], [["#A1 ", "x"], ["B2", "y"], ["C3", "z"]]
+    )
+    session.put_rows("jright", ["k", "w"], [["a1", "1"], ["b2", "2"]])
+    tool = dat.VerifyJoinTool(session)
+    out = await tool.execute("jleft", "k", "jright", "k")
+    assert "key normalization" in out and "0 -> 2" in out
+    assert "unmatched left keys" in out
+
+    # partial raw match: the missing-key count and sample name the gap
+    session.put_rows(
+        "jleft2", ["k", "v"], [["a1", "x"], ["b2", "y"], ["x9", "z"]]
+    )
+    out = await tool.execute("jleft2", "k", "jright", "k")
+    assert "no right match" in out and "x9" in out
+
+
 async def test_grain_check_detects_hierarchy(session):
     from raven.plugin.data_agent.grain_check import GrainCheckTool
 
@@ -601,13 +619,13 @@ async def test_submit_answer_writes_rows_and_adjudication(tmp_path):
     out = await tool.execute(
         rows=["Alpha 10", "Beta 8", "Gamma 5"],
         selected_reading="rank stores by units sold, absolute count",
-        rejected_readings=["rank by revenue"],
+        rejected_readings=["rank by revenue: computed, gives Beta 900 / Alpha 700 / Gamma 120"],
         reason="the question says 'most units'; units_sold has 812 rows vs 0 rows for any revenue column",
     )
     assert "wrote 3 rows" in out
     assert (tmp_path / "answer.txt").read_text() == "Alpha 10\nBeta 8\nGamma 5\n"
     record = _json.loads((tmp_path / "adjudication.json").read_text())
-    assert record["rows_delivered"] == 3 and record["rejected_readings"] == ["rank by revenue"]
+    assert record["rows_delivered"] == 3 and len(record["rejected_readings"]) == 1
 
 
 async def test_submit_answer_refuses_hollow_adjudication(tmp_path):
@@ -633,7 +651,7 @@ async def test_submit_answer_requires_numbers_when_adjudicating(tmp_path):
     out = await tool.execute(
         rows=["ka0X"],
         selected_reading="quantity-tier reading of the discount policy",
-        rejected_readings=["mandatory bundle reading"],
+        rejected_readings=["mandatory bundle reading: fires on 209/209 quotes (background)"],
         reason="tier reading: 2659/2966 rows exactly on tier, 0 below; bundle reading fires on 209/209 quotes (background)",
     )
     assert "wrote 1 rows" in out
@@ -642,7 +660,76 @@ async def test_submit_answer_requires_numbers_when_adjudicating(tmp_path):
         selected_reading="single literal reading",
         reason="the question admits one reading; direct aggregate over the full table computed",
     )
+    assert "REFUSED" in out and "reading families" in out
+    out = await tool.execute(
+        rows=["42"],
+        selected_reading="single literal reading",
+        reason="the question admits one reading; direct aggregate over the full table computed",
+    )
     assert "wrote 1 rows" in out
+
+
+async def test_submit_answer_requires_computed_rejected_readings(tmp_path):
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+
+    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"))
+    base = dict(
+        rows=["a", "b", "c"],
+        selected_reading="entity-weighted count over resolved names",
+        reason="entity-weighted: 41 entities; record-weighted: 977 rows dominated by 3 duplicates",
+    )
+    out = await tool.execute(
+        **base, rejected_readings=["record-weighted count (looked wrong)"]
+    )
+    assert "REFUSED" in out and "carry no computed value" in out
+    out = await tool.execute(
+        **base, rejected_readings=["record-weighted count: 977 rows"]
+    )
+    assert "wrote 3 rows" in out
+    out = await tool.execute(
+        **base, rejected_readings=["revenue-based reading: no such column in any table"]
+    )
+    assert "wrote 3 rows" in out
+
+
+async def test_submit_answer_nudges_single_value_no_alternatives_once(tmp_path):
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+
+    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"))
+    kwargs = dict(
+        rows=["7"],
+        selected_reading="calendar-year window, inclusive bounds",
+        reason="COUNT over the full filtered population for 2019, one aggregate over 8140 rows",
+    )
+    out = await tool.execute(**kwargs)
+    assert "REFUSED" in out and "reading families" in out
+    out = await tool.execute(**kwargs)
+    assert "wrote 1 rows" in out
+
+    # Providing computed alternatives up front skips the nudge entirely.
+    fresh = SubmitAnswerTool(answer_path=str(tmp_path / "a2.txt"))
+    out = await fresh.execute(
+        rows=["7"],
+        selected_reading="calendar-year window, inclusive bounds",
+        rejected_readings=["fiscal-year window: 9, differs from calendar 7"],
+        reason="calendar 7 vs fiscal 9 over 8140 rows; the question names January explicitly",
+    )
+    assert "wrote 1 rows" in out
+
+
+def test_submit_answer_contract_carries_delivery_rules():
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+
+    tool = SubmitAnswerTool()
+    desc = tool.description
+    assert "unverifiable" in desc and "outside knowledge" in desc
+    assert "removed zero rows" in desc
+    assert "record-weighted vs entity-weighted" in desc
+    assert "every defensible variant" in desc
+    reason_desc = tool.parameters["properties"]["reason"]["description"]
+    assert "margin over the runner-up" in reason_desc
+    rejected_desc = tool.parameters["properties"]["rejected_readings"]["description"]
+    assert "not rejected, it is ignored" in rejected_desc
 
 
 async def test_submit_answer_refuses_for_each_shortfall_once(tmp_path):
@@ -661,6 +748,10 @@ async def test_submit_answer_refuses_for_each_shortfall_once(tmp_path):
     out = await tool.execute(**kwargs)
     assert "REFUSED" in out and "for each" in out
     assert not (tmp_path / "answer.txt").exists()
+    # The single-reading nudge is an independent one-shot gate; a short
+    # no-alternatives delivery consumes it next, then the answer lands.
+    out = await tool.execute(**kwargs)
+    assert "REFUSED" in out and "reading families" in out
     out = await tool.execute(**kwargs)
     assert "wrote 2 rows" in out
 
@@ -678,11 +769,14 @@ async def test_submit_answer_refuses_for_each_shortfall_once(tmp_path):
         answer_path=str(tmp_path / "a3.txt"),
         question_path=str(tmp_path / "missing.txt"),
     )
-    out = await noq.execute(
+    nkw = dict(
         rows=["42"],
         selected_reading="single literal reading",
         reason="direct aggregate over the full table computed, single reading",
     )
+    out = await noq.execute(**nkw)
+    assert "REFUSED" in out and "reading families" in out
+    out = await noq.execute(**nkw)
     assert "wrote 1 rows" in out
 
 
@@ -693,22 +787,22 @@ async def test_survey_sources_surfaces_synonym_columns_and_shapes(session, tmp_p
     monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
     session.put_rows(
         "clinical",
-        ["histological_type", "icd_histology_code", "sample_id", "purity"],
+        ["lesion_type", "lesion_type_code", "sample_id", "purity"],
         [
-            ["Astrocytoma", "9382/3", "s1", "0.71"],
-            ["Astrocytoma", "9400/3", "s2", "0.55"],
-            ["Oligodendroglioma", "9450/3", "s3", "0.62"],
-            ["Oligodendroglioma", "[Not Available]", "s4", "0.44"],
+            ["Alpha type", "100/1", "s1", "0.71"],
+            ["Alpha type", "200/2", "s2", "0.55"],
+            ["Beta type", "300/3", "s3", "0.62"],
+            ["Beta type", "[Not Available]", "s4", "0.44"],
         ],
     )
     session.put_rows(
         "quotes",
         ["quantity", "line_amount"],
-        [["5", "2279.95"], ["8", "2379.93"], ["10", "4499.91"], ["7", "2260.93"]],
+        [["5", "1111.11"], ["8", "2222.22"], ["10", "3333.33"], ["7", "4444.44"]],
     )
     out = await SurveySourcesTool(session).execute()
     notes = (tmp_path / "survey.md").read_text()
-    assert "SYNONYM GROUP" in out and "histolog" in out.lower()
+    assert "SYNONYM GROUP" in out and "lesion" in out.lower()
     assert "1 bracketed" in notes
     assert "count-like" in notes and "money/measure-like" in notes
     assert "ratio-like" in notes
@@ -738,6 +832,34 @@ async def test_survey_sources_flags_list_valued_columns(session, tmp_path, monke
     assert "categories" in flagged and "name" not in flagged
 
 
+async def test_survey_sources_survives_broken_show_all_tables(session, tmp_path, monkeypatch):
+    from raven.plugin.data_agent import survey as survey_mod
+    from raven.plugin.data_agent.survey import SurveySourcesTool
+
+    monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
+    session.put_rows(
+        "tracks",
+        ["track_id", "title"],
+        [["1", "Song A"], ["2", "Song B"], ["3", "Song C"]],
+    )
+    tool = SurveySourcesTool(session)
+    real_q = tool._q
+
+    async def poisoned_q(sql, deadline, preview=32):
+        if "SHOW ALL TABLES" in sql:
+            raise RuntimeError(
+                "INTERNAL Error: Information loss on integer cast: value "
+                "-1456564680077579643 outside of target range"
+            )
+        return await real_q(sql, deadline, preview=preview)
+
+    monkeypatch.setattr(tool, "_q", poisoned_q)
+    out = await tool.execute()
+    assert "[SURVEY ERROR]" not in out
+    assert "tracks" in out and "title" in (tmp_path / "survey.md").read_text()
+    assert "degraded" in out
+
+
 async def test_survey_sources_detects_hierarchy_and_join_candidates(session, tmp_path, monkeypatch):
     from raven.plugin.data_agent import survey as survey_mod
     from raven.plugin.data_agent.survey import SurveySourcesTool
@@ -754,3 +876,204 @@ async def test_survey_sources_detects_hierarchy_and_join_candidates(session, tmp
     assert "HIERARCHY" in notes and "org_name" in notes
     assert "JOIN CANDIDATE" in notes and "repo_name" in notes
     assert "surveyed" in out
+
+
+async def test_survey_template_census_names_phrasing_families(session, tmp_path, monkeypatch):
+    from raven.plugin.data_agent import survey as survey_mod
+    from raven.plugin.data_agent.survey import SurveySourcesTool
+
+    monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
+    monkeypatch.setattr(survey_mod, "_TEMPLATE_MIN_ROWS", 6)
+    rows = (
+        [[f"downloaded {i * 7} times"] for i in range(1, 5)]
+        + [[f"{i * 3} downloads this week"] for i in range(1, 4)]
+        + [["no digits in this one"]]
+    )
+    session.put_rows("pkg_stats", ["stats_text"], rows)
+    # Free text masks to mostly unique templates: no family line for it.
+    session.put_rows(
+        "notes_free",
+        ["txt"],
+        [[f"met client {i} at venue {chr(65 + i)} discussing item {i * i}"] for i in range(12)],
+    )
+    out = await SurveySourcesTool(session).execute()
+    assert 'NUMBER-IN-TEXT column "stats_text"' in out
+    assert "downloaded N times" in out and "N downloads this week" in out
+    assert "cover EVERY family" in out
+    assert 'NUMBER-IN-TEXT column "txt"' not in out
+
+
+async def test_survey_near_hierarchy_reports_dual_grain_purity(session, tmp_path, monkeypatch):
+    from raven.plugin.data_agent import survey as survey_mod
+    from raven.plugin.data_agent.survey import SurveySourcesTool
+
+    monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
+    rows = [["p1", f"s{i:02d}"] for i in range(10)]
+    rows += [["p2", f"s{i:02d}"] for i in range(10, 20)]
+    rows += [["p1", "sX"], ["p2", "sX"]]
+    session.put_rows("cohort", ["ctype", "csubtype"], rows)
+    out = await SurveySourcesTool(session).execute()
+    assert 'NEAR-HIERARCHY: "ctype" ~ parent of "csubtype"' in out
+    assert "purity 0.95" in out and "BOTH grains" in out
+    assert "never noise to clean away" in out
+
+
+async def test_survey_wide_table_prioritizes_related_columns(session, tmp_path, monkeypatch):
+    from raven.plugin.data_agent import survey as survey_mod
+    from raven.plugin.data_agent.survey import SurveySourcesTool
+
+    monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
+    monkeypatch.setattr(survey_mod, "_MAX_COLUMNS_PER_TABLE", 4)
+    # Two stem-related columns sit far apart in physical order; the filler
+    # columns in between would consume the whole profiling budget.
+    cols = ["filler_alpha", "batch_code", "filler_beta", "filler_gamma", "batch_label"]
+    session.put_rows("wide", cols, [[f"v{i}{j}" for j in range(5)] for i in range(3)])
+    out = await SurveySourcesTool(session).execute()
+    notes = (tmp_path / "survey.md").read_text()
+    assert "profiled 4 of 5 columns" in out
+    assert "NOT profiled" in out
+    assert "- batch_code:" in notes and "- batch_label:" in notes
+    assert "SYNONYM GROUP" in notes
+
+
+async def test_survey_fd_probe_reaches_name_related_pair_on_wide_table(session, tmp_path, monkeypatch):
+    from raven.plugin.data_agent import survey as survey_mod
+    from raven.plugin.data_agent.survey import SurveySourcesTool
+
+    monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
+    monkeypatch.setattr(survey_mod, "_FD_MAX_PAIRS_PER_TABLE", 1)
+    # Physical order pairs col0 with everything; only name-relatedness ordering
+    # spends the single probe on the (type, subtype) pair that matters.
+    rows = []
+    for i in range(9):
+        rows.append([f"noise{i}", f"pad{i % 3}", f"t{i % 3}", f"s{i}"])
+    session.put_rows("clin", ["noise_col", "pad_col", "lesion_type", "lesion_subtype"], rows)
+    await SurveySourcesTool(session).execute()
+    notes = (tmp_path / "survey.md").read_text()
+    assert "HIERARCHY" in notes
+    assert '"lesion_type"' in notes and '"lesion_subtype"' in notes
+
+
+async def test_survey_flags_cross_cutting_same_concept_columns(session, tmp_path, monkeypatch):
+    from raven.plugin.data_agent import survey as survey_mod
+    from raven.plugin.data_agent.survey import SurveySourcesTool
+
+    monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
+    # Two same-concept encodings that partition rows differently: neither a
+    # hierarchy (violations both ways) nor aliases (distinct counts differ).
+    rows = [
+        ["Alpha type", "100/1"],
+        ["Alpha type", "200/2"],
+        ["Beta type", "100/1"],
+        ["Beta type", "300/3"],
+        ["Gamma type", "400/4"],
+        ["Gamma type", "300/3"],
+    ]
+    session.put_rows("lesion", ["lesion_name", "lesion_code"], rows)
+    out = await SurveySourcesTool(session).execute()
+    assert "CROSS-CUTTING" in out
+    assert "NOT a hierarchy and NOT aliases" in out
+    assert "code-shaped values included" in out
+    assert "NEAR-HIERARCHY" not in out
+
+
+async def test_survey_reports_phrasing_families_in_free_text(session, tmp_path, monkeypatch):
+    from raven.plugin.data_agent import survey as survey_mod
+    from raven.plugin.data_agent.survey import SurveySourcesTool
+
+    monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
+    monkeypatch.setattr(survey_mod, "_TEMPLATE_MIN_ROWS", 6)
+    # One subject written three ways: a pattern matching one shape drops the rest.
+    rows = []
+    for i in range(4):
+        rows.append([f"In the Alpha study dataset, subject SUBJ-{i:03d} (UUID 1a2b3c4d-99-{i}) is enrolled."])
+    for i in range(4):
+        rows.append([f"Subject SUBJ-{i:03d} (UUID 5e6f7a8b-11-{i}) is enrolled in the Alpha study."])
+    for i in range(4):
+        rows.append([f"Subject SUBJ-{i:03d}, registered under UUID 9c8d7e6f-22-{i}, belongs to the Alpha study cohort."])
+    session.put_rows("subjects", ["subject_note"], rows)
+    out = await SurveySourcesTool(session).execute()
+    assert 'PHRASING FAMILIES in free-text column "subject_note"' in out
+    assert "must match EVERY shape" in out
+    assert "3 distinct shapes over 12 rows" in out
+
+
+async def test_survey_skips_phrasing_families_for_short_values(session, tmp_path, monkeypatch):
+    from raven.plugin.data_agent import survey as survey_mod
+    from raven.plugin.data_agent.survey import SurveySourcesTool
+
+    monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
+    monkeypatch.setattr(survey_mod, "_TEMPLATE_MIN_ROWS", 6)
+    session.put_rows("codes", ["state"], [[f"state_{i % 4}"] for i in range(12)])
+    out = await SurveySourcesTool(session).execute()
+    assert "PHRASING FAMILIES" not in out
+
+
+async def test_survey_skips_phrasing_families_for_free_text(session, tmp_path, monkeypatch):
+    from raven.plugin.data_agent import survey as survey_mod
+    from raven.plugin.data_agent.survey import SurveySourcesTool
+
+    monkeypatch.setattr(survey_mod, "_NOTES_PATH", str(tmp_path / "survey.md"))
+    monkeypatch.setattr(survey_mod, "_TEMPLATE_MIN_ROWS", 6)
+    # Genuinely free text: about as many shapes as rows, so a shape census would
+    # be noise. Measured on real document columns, which sit near a 1:1 ratio.
+    rows = [
+        [f"unique opening line {i} followed by prose that shares no template with the others at all"]
+        for i in range(40)
+    ]
+    session.put_rows("docs", ["body"], rows)
+    out = await SurveySourcesTool(session).execute()
+    assert "PHRASING FAMILIES" not in out
+
+
+async def test_submit_answer_requires_measured_self_imposed_exclusions(tmp_path):
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+    import json as _json
+
+    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"))
+    base = dict(
+        rows=["alpha 9", "beta 8", "gamma 7", "delta 6", "epsilon 5"],
+        selected_reading="rank entries by the stored score, all entries eligible",
+        reason="score column populated on 2451 of 2451 entries; runner-up margin 21 points",
+    )
+    out = await tool.execute(
+        **base, excluded_populations=["dropped entries whose name looked synthetic"]
+    )
+    assert "REFUSED" in out and "declared without measurement" in out
+    assert not (tmp_path / "answer.txt").exists()
+
+    out = await tool.execute(
+        **base,
+        excluded_populations=[
+            "dropped 10941 entries whose name looked synthetic; keeping them changes "
+            "the top 5 to a different set of 5"
+        ],
+    )
+    assert "wrote 5 rows" in out
+    record = _json.loads((tmp_path / "adjudication.json").read_text())
+    assert record["excluded_populations"] and "10941" in record["excluded_populations"][0]
+
+
+def test_submit_answer_contract_names_self_imposed_exclusions():
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+
+    tool = SubmitAnswerTool()
+    desc = tool.description
+    assert "subpopulation you decided to leave out" in desc
+    assert "Dropping them is a reading, not cleanup" in desc
+    assert "BEFORE any predicate you added" in desc
+    params = tool.parameters
+    assert "excluded_populations" in params["required"]
+    excl = params["properties"]["excluded_populations"]["description"]
+    assert "what the answer becomes without it" in excl
+
+
+def test_submit_answer_contract_separates_membership_from_completeness():
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+
+    desc = SubmitAnswerTool().description
+    # The unverifiable-predicate rule must stay scoped to the column the
+    # question reads, or it becomes a licence to evict sparse rows.
+    assert "does not travel to any other column" in desc
+    assert "Membership comes from the table the question points at" in desc
+    assert "completeness opinion" in desc

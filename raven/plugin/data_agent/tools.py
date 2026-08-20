@@ -370,7 +370,11 @@ class VerifyJoinTool(Tool):
             "Probe a candidate equi-join before you trust it: reports left/right row counts, "
             "how many left keys match, and the max fan-out. Catches silent join failures "
             "(no match -> empty result) and cardinality blow-ups (wrong grain -> inflated sums). "
-            "Optionally transform keys, e.g. left_transform=\"replace(id,'bid_','')\"."
+            "When keys only partly match, it retries with normalized keys (trim, case-fold, "
+            "'#' stripped) and samples unmatched left keys, so the needed transform is visible "
+            "from one call. Optionally transform keys, e.g. left_transform=\"replace(id,'bid_','')\". "
+            "After adopting a join, aggregate to the join grain first (GROUP BY key in a CTE, "
+            "then join the dimension) and check that the row count is unchanged by the join."
         )
 
     @property
@@ -425,6 +429,31 @@ class VerifyJoinTool(Tool):
             return f"[VERIFY_JOIN ERROR] {exc}\nNext: profile both columns to confirm they exist and share a value shape."
         l_rows, l_keys = int(lcount[0]), int(lcount[1])
         match_rate = 0.0 if not l_keys else matched / l_keys
+        # Diagnostic probes for a partial match; they refine the verdict, so a
+        # probe failure degrades to the base report instead of erroring the call.
+        norm_matched = None
+        unmatched_sample: list[str] = []
+        if match_rate < 1.0 and l_keys:
+            norm = lambda expr: f"lower(trim(replace(CAST({expr} AS VARCHAR), '#', '')))"
+            try:
+                norm_matched = int(
+                    _one_row(
+                        await _query(
+                            self._session,
+                            f"SELECT COUNT(DISTINCT l.k) FROM (SELECT {norm(lk)} AS k FROM {left}) l "
+                            f"WHERE l.k IN (SELECT {norm(rk)} FROM {right})",
+                        )
+                    )[0]
+                )
+                sample = await _query(
+                    self._session,
+                    f"SELECT DISTINCT l.k FROM (SELECT {lk} AS k FROM {left}) l "
+                    f"WHERE l.k IS NOT NULL AND NOT EXISTS "
+                    f"(SELECT 1 FROM (SELECT {rk} AS k FROM {right}) r WHERE r.k = l.k) LIMIT 3",
+                )
+                unmatched_sample = [str(r[0]) for r in (sample.get("rows") or [])]
+            except _KernelQueryError:
+                pass
         verdict = []
         if match_rate == 0:
             verdict.append(
@@ -432,11 +461,28 @@ class VerifyJoinTool(Tool):
             )
         elif match_rate < 0.5:
             verdict.append(f"low match rate {match_rate:.2f} -- check for a key format mismatch before trusting this join.")
+        elif match_rate < 1.0:
+            verdict.append(
+                f"match rate {match_rate:.2f}: {l_keys - matched} left key(s) have no right match -- "
+                "those rows vanish in an inner join; fix the key transform, or use a LEFT JOIN "
+                "with an explicit policy for the missing side."
+            )
         else:
             verdict.append(f"match rate {match_rate:.2f}.")
+        if norm_matched is not None and norm_matched > matched:
+            verdict.append(
+                f"key normalization (trim/case-fold/'#' strip) raises matched keys "
+                f"{matched} -> {norm_matched}; join on normalized keys, e.g. "
+                "lower(trim(replace(CAST(key AS VARCHAR),'#',''))) on both sides."
+            )
+        if unmatched_sample:
+            verdict.append(f"unmatched left keys e.g. {unmatched_sample}.")
         if fanout and int(fanout) > 1:
             verdict.append(
-                f"right side is not unique (max fan-out {fanout}); a join will multiply left rows -- aggregate or dedupe first."
+                f"right side is not unique (max fan-out {fanout}); a join will multiply left rows "
+                "and inflate every SUM/COUNT over them -- aggregate before joining "
+                "(WITH agg AS (SELECT key, <aggregates> FROM fact GROUP BY key) SELECT ... FROM agg "
+                "JOIN dim ...), then check the row count is unchanged by the join."
             )
         return (
             f"left {left}: {l_rows} rows, {l_keys} distinct keys\n"
