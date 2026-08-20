@@ -343,11 +343,11 @@ class TestIdentityIsSingleSourced:
 
 
 class TestKeylessDefaultDegrade:
-    """memory.backend defaults to "everos" on this line, but a keyless local
-    EverOS refuses to boot and the one-shot path is fail-fast -- honoring the
-    default on a keyless install would turn every -m run into a 30s hang +
-    exit 1. The DEFAULT therefore degrades to no-memory; explicit intent and
-    remote deployments do not."""
+    """memory.backend defaults to "everos" on this line, but a local EverOS
+    missing either model key refuses to boot and the one-shot path is
+    fail-fast -- honoring the default on a keyless install would turn every
+    -m run into a 30s hang + exit 1. The DEFAULT therefore degrades to
+    no-memory; explicit intent and remote deployments do not."""
 
     def test_unset_default_without_keys_degrades_to_none(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

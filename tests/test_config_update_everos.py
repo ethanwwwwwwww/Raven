@@ -266,8 +266,8 @@ class TestModelsConfigured:
         assert ue.everos_models_configured() is True
 
     def test_llm_key_alone_is_not_enough(self, everos_home: Path) -> None:
-        """The server boots on the LLM key alone but every search then fails
-        at runtime, which the recall path surfaces as a failed turn."""
+        """The embedding provider is built at server startup too, so an
+        LLM-only config still refuses to boot (measured on 1.1.3)."""
         everos_home.parent.mkdir(parents=True, exist_ok=True)
         everos_home.write_text('[llm]\napi_key = "k1"\n')
         assert ue.everos_models_configured() is False

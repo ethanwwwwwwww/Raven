@@ -157,13 +157,14 @@ def ensure_everos_home() -> None:
 def everos_models_configured() -> bool:
     """Whether the local EverOS runtime has the credentials it needs to boot.
 
-    A keyless ``everos server start`` refuses to come up
-    (``LLMNotConfiguredError``), so "memory on by default" is only honest
-    when this returns True. Per section, the env var wins over the user
-    toml, mirroring EverOS's own settings precedence. Both the LLM and the
-    embedding key are required: the server boots on the LLM key alone but
-    every search then fails at runtime, which the recall path surfaces as
-    a failed turn.
+    A keyless ``everos server start`` refuses to come up -- both provider
+    clients are built during startup, so a missing LLM key raises
+    ``LLMNotConfiguredError`` and a missing embedding key raises before the
+    app binds (measured on the pinned 1.1.3). "Memory on by default" is
+    therefore only honest when this returns True for both. Per section,
+    the env var wins over the user toml, mirroring EverOS's own settings
+    precedence. Rerank / multimodal keys are NOT gated on: the reranker is
+    resolved lazily and degrades to None.
     """
 
     def _key(section: str) -> str:
