@@ -42,16 +42,18 @@ def test_inference_replicates_the_pre_profile_behavior() -> None:
     assert legacy.source == "inferred"
 
 
-def test_legacy_oneshot_equals_the_old_not_interactive_defaults() -> None:
+def test_legacy_oneshot_ships_gates_off_on_the_swarm_line() -> None:
+    """The swarm-integration policy pin: the implicit `-m` path (what an
+    orchestrator drives) arms NO completion gate by default -- the worker
+    also serves non-coding requests, where change-the-code gates only
+    mis-fire. RAVEN_PROFILE / per-gate env vars arm them explicitly."""
     legacy = PROFILES["legacy_oneshot"]
-    # The old wiring: gates_default = not interactive = True, generic verify
-    # wording, deadline checkpoint off, shadow checkpoint off, ask_user on.
-    assert legacy.gates.test_evidence is True
-    assert legacy.gates.verify_complete is True
+    assert legacy.gates.test_evidence is False
+    assert legacy.gates.verify_complete is False
     assert legacy.gates.verify_wording == "generic"
-    assert legacy.gates.stale is True
-    assert legacy.gates.red is True
-    assert legacy.gates.empty_diff is True
+    assert legacy.gates.stale is False
+    assert legacy.gates.red is False
+    assert legacy.gates.empty_diff is False
     assert legacy.deadline_checkpoint is False
     assert legacy.shadow_checkpoint is False
     assert legacy.ask_user_enabled is True

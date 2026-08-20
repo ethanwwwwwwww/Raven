@@ -132,16 +132,19 @@ PROFILES: dict[str, RunProfile] = {
         deadline_wrapup_sec=420.0,
         deadline_hard_stop_sec=None,
     ),
-    # Inference-only compatibility snapshot: exactly what `-m` (and any
-    # third-party caller passing interactive=False) gets today. Not accepted
-    # via RAVEN_PROFILE. Delete once explicit profiles carry all real traffic.
+    # Inference fallback for `-m` (and any third-party caller passing
+    # interactive=False) without an explicit profile. Not accepted via
+    # RAVEN_PROFILE. On the swarm-integration line this path ships gates
+    # OFF: an orchestrated worker also serves non-coding requests, where
+    # change-the-code gates only mis-fire; RAVEN_PROFILE=eval_coding or the
+    # per-gate env vars arm them for coding-style runs.
     "legacy_oneshot": RunProfile(
         name="legacy_oneshot",
         source="preset",
         attended=True,
         delivery="none",
         acceptance="conversation",
-        gates=_GATES_ON,
+        gates=_GATES_OFF,
         deadline_checkpoint=False,
         shadow_checkpoint=False,
         ask_user_enabled=True,
