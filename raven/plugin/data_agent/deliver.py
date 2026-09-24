@@ -23,6 +23,25 @@ _MIN_REASON_CHARS = 40
 _MAX_ROWS = 10_000
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?%?")
 _FOR_EACH_RE = re.compile(r"\bfor (?:each|every)\b", re.IGNORECASE)
+# A question that asks for two things joined in one request: either an explicit
+# add-on phrase, or a request verb whose clause carries an "and". A one-value
+# answer to such a question is half an answer, and the half that is there
+# still matches, so nothing about the reply looks wrong from the inside.
+_MULTI_REQUEST_RE = re.compile(
+    r"\b(?:as well as|along with|together with)\b"
+    r"|\b(?:identify|list|return|report|give|find|name|show|which|what|who)\b"
+    r"[^.?!]*\band\b",
+    re.IGNORECASE,
+)
+# Field separators inside one delivered row. Their absence means the row
+# carries a single value.
+_FIELD_SEP_RE = re.compile("[,;|\\t]|:\\s|\\s[-\\N{EM DASH}\\N{EN DASH}]\\s")
+# Words of the question an exclusion has to quote back for its basis to be
+# checkable. Naming a condition in your own words is an argument; quoting the
+# words the question uses is evidence about what it asked for. Four is short
+# enough for a real clause and long enough not to hit by accident.
+_QUOTE_WORDS = 4
+_WORD_RE = re.compile(r"[^\w\s]")
 # A rejected reading needs the value it produced when computed -- unless it is
 # structurally impossible to compute, which these phrasings assert.
 _STRUCTURAL_RE = re.compile(
@@ -47,6 +66,10 @@ class SubmitAnswerTool(Tool):
         self._profile = profile or GENERAL
         self._for_each_warned = False
         self._single_reading_warned = False
+        self._exclusion_basis_warned = False
+        self._exclusion_basis_final = False
+        self._exclusion_rows: tuple[str, ...] | None = None
+        self._conjunctive_warned = False
 
     @property
     def name(self) -> str:
@@ -86,7 +109,21 @@ class SubmitAnswerTool(Tool):
             "completely a row happens to be filled in -- treating sparsely populated "
             "rows as second-class records is a completeness opinion, not a predicate "
             "the question asked for, and it shrinks the population without leaving a "
-            "trace in the answer. Before submitting, check that each qualifier stated in the "
+            "trace in the answer. The same goes for how a value looks: a populated, "
+            "distinct identifier is what the store says it is, however malformed, "
+            "concatenated or synthetic it reads. Before excluding rows whose "
+            "identifiers offend your grammar for the domain, check whether the store "
+            "itself classifies them -- any column whose values say what kind of thing "
+            "a row is -- and whether that classification is the population the "
+            "question asks about: a stored classification settles membership, and the "
+            "naming conventions you know are outside knowledge, exactly like any other "
+            "fact the data cannot verify. Dropping such rows on shape alone is a "
+            "data-quality opinion; when no condition the question stated and no "
+            "missing deciding value backs an exclusion -- when the choice would be "
+            "taste rather than a stored value -- deliver the reading that transforms "
+            "the stored population least "
+            "and keep the excluded variant as a declared, computed alternative. "
+            "Before submitting, check that each qualifier stated in the "
             "question actually changed the cohort: one that removed zero rows while "
             "such values exist elsewhere in that column usually means the wrong "
             "column or grain was filtered -- recompute there instead. Before "
@@ -222,6 +259,34 @@ class SubmitAnswerTool(Tool):
                 )
                 if refused:
                     return refused
+        # A question can name two things in one request ("the repository AND the
+        # file", "the packages as well as their versions"). Answering with one
+        # of them is the failure nothing catches from the inside: the half that
+        # is delivered is correct, the reply reads complete, and the missing
+        # half leaves no gap to notice. A single row carrying a single value is
+        # where that lands, so refuse once there and let the agent confirm.
+        if (
+            len(rows) == 1
+            and not _FIELD_SEP_RE.search(rows[0])
+            and not self._conjunctive_warned
+            and self._profile.gate_mode("conjunctive_request") != "off"
+        ):
+            question = self._read_question()
+            if question and _MULTI_REQUEST_RE.search(question):
+                self._conjunctive_warned = True
+                refused = gate(
+                    "conjunctive_request",
+                    "the question names more than one thing to report, and the "
+                    "answer is a single value. Re-read the request and list every "
+                    "thing it asks for -- the entity plus each attribute of it the "
+                    "wording names -- then deliver one rows element per thing (or "
+                    "one row carrying them as separate fields). A half answer "
+                    "matches on the half it carries, so nothing about it looks "
+                    "wrong from here. If the question truly asks for one value, "
+                    "resubmit as is.",
+                )
+                if refused:
+                    return refused
         # The R18a failure mode is not a bad adjudication but a missing one: the
         # agent never suspects a second reading exists, leaves rejected_readings
         # empty, and every reason-side gate is bypassed. A short answer with no
@@ -297,6 +362,72 @@ class SubmitAnswerTool(Tool):
             )
             if refused:
                 return refused
+        # Measured or not, a self-imposed exclusion still needs a basis. Two
+        # bases make it a predicate instead of an opinion: a condition the
+        # question itself states, or a deciding value that is missing or a
+        # placeholder on the dropped rows (unverifiable, so the stated
+        # condition cannot hold). Everything else -- identifier shape, row
+        # sparseness, plausibility -- is taste, and in unattended delivery
+        # taste loses to the reading that transforms the stored population
+        # least. One in-session refusal while the tools are in hand; the
+        # resubmission is the agent's call.
+        # A refusal answered by the same rows plus reworded prose is not an
+        # answer to it: the exclusion survived, only its justification changed.
+        # That resubmission gets one final refusal naming exactly that, and
+        # then the agent's judgment stands (a third pass would be a deadlock).
+        if (
+            excluded_populations
+            and self._exclusion_basis_warned
+            and not self._exclusion_basis_final
+            and self._exclusion_rows == tuple(rows)
+            and not self._quotes_question(excluded_populations)
+            and self._profile.gate_mode("exclusion_basis") != "off"
+        ):
+            self._exclusion_basis_final = True
+            refused = gate(
+                "exclusion_basis",
+                "these are the same rows the last refusal returned, and no entry "
+                "quotes the question. Restating in your own words why the rows "
+                "were dropped does not make the drop a predicate: if the question "
+                "itself imposes the condition, its wording is in the question, so "
+                "quote that wording inside the entry. If instead the deciding "
+                "value is simply absent on those rows, name the column and the "
+                "stored emptiness you checked -- and only for the column the "
+                "question's condition reads, never a neighbouring one. Do not "
+                "change the answer to satisfy this check: if the rows are right, "
+                "they stay, and only the entry gains the quote. If no entry can "
+                "carry either, the population that keeps those rows is the "
+                "reading to deliver, and you have already computed it. This is "
+                "the last check on this point.",
+            )
+            if refused:
+                return refused
+        if (
+            excluded_populations
+            and not self._exclusion_basis_warned
+            and self._profile.gate_mode("exclusion_basis") != "off"
+        ):
+            self._exclusion_basis_warned = True
+            self._exclusion_rows = tuple(rows)
+            refused = gate(
+                "exclusion_basis",
+                f"{len(excluded_populations)} exclusion(s) drop rows the question "
+                "never named. Exactly two bases make an exclusion a predicate "
+                "instead of an opinion: (1) a condition the question itself "
+                "states, applied to the column it names; (2) the deciding value "
+                "is missing or a placeholder on those rows, so the stated "
+                "condition is unverifiable there. An identifier grammar or "
+                "plausibility judgment brought from outside the store is not a "
+                "basis. Re-check every entry and resubmit with its basis named "
+                "inside each entry; for any drop of odd-looking rows, quote what the "
+                "store itself classifies them as -- whichever column says what kind "
+                "of thing a row is -- because a stored classification matching the "
+                "population the question asks about means the drop has no basis, and "
+                "the reading that keeps those rows (already computed as your "
+                "alternative) is the one to deliver.",
+            )
+            if refused:
+                return refused
 
         import json
 
@@ -326,6 +457,29 @@ class SubmitAnswerTool(Tool):
             )
         return out
 
+
+    def _quotes_question(self, entries: list[str]) -> bool:
+        """True when some entry quotes the question verbatim. A condition the
+        question states can be shown by giving its words back; a condition the
+        agent inferred cannot, which is the whole difference this gate is
+        asking about."""
+        question = self._read_question()
+        if not question:
+            # No question to check against: the gate cannot tell an argument
+            # from a citation, so it does not get a second pass.
+            return True
+        words = _WORD_RE.sub(" ", question.lower()).split()
+        if len(words) < _QUOTE_WORDS:
+            return True
+        grams = {
+            " ".join(words[i : i + _QUOTE_WORDS])
+            for i in range(len(words) - _QUOTE_WORDS + 1)
+        }
+        for entry in entries:
+            text = " ".join(_WORD_RE.sub(" ", str(entry).lower()).split())
+            if any(gram in text for gram in grams):
+                return True
+        return False
 
     def _read_question(self) -> str:
         try:

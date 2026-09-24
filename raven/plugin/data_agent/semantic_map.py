@@ -24,6 +24,15 @@ Only when the sampled disagreement rate crosses a threshold does the full
 second pass run; consistent tasks keep near-single-pass cost, which is what
 lets whole-corpus classification finish inside a task timeout. Sampled batches
 always keep their tie-breaks either way.
+
+Cross-model verification (R30): same-model voting locks in the labeler's own
+systematic bias -- two channels of one model agree on the same wrong boundary,
+and a same-model tie-break sides with them. When ``semantic_map_verify_model``
+names a different model, the second channel runs on it (full, not sampled:
+cross-model disagreement is the signal being bought, not a consistency check)
+and ``semantic_map_arbiter_model`` breaks the ties, so disputed rows get the
+strongest judgment while agreed rows stay at batch-labeler cost. Both keys
+default to the base labeling model, which reproduces the old behavior exactly.
 """
 
 from __future__ import annotations
@@ -69,10 +78,30 @@ class SemanticMapTool(Tool):
 
     timeout_seconds = 1_800.0
 
-    def __init__(self, session: DataAgentSession, provider: Any, model: str | None = None) -> None:
+    def __init__(
+        self,
+        session: DataAgentSession,
+        provider: Any,
+        model: str | None = None,
+        verify_model: str | None = None,
+        arbiter_model: str | None = None,
+    ) -> None:
         self._session = session
         self._provider = provider
         self._model = model
+        self._verify_model = verify_model
+        self._arbiter_model = arbiter_model
+
+    def _variant_model(self, variant: int) -> str | None:
+        if variant == 1:
+            return self._verify_model or self._model
+        if variant == 2:
+            return self._arbiter_model or self._model
+        return self._model
+
+    @property
+    def _cross_model(self) -> bool:
+        return bool(self._verify_model) and self._verify_model != self._model
 
     @property
     def name(self) -> str:
@@ -184,30 +213,41 @@ class SemanticMapTool(Tool):
 
         if labels:
             live = [i for i, m in enumerate(firsts) if m is not None]
-            step = max(1, len(live) // _VOTE_SAMPLE_BATCHES) if live else 1
-            sampled = live[::step][:_VOTE_SAMPLE_BATCHES]
             seconds: dict[int, dict[str, str]] = {}
-            for i, second in zip(
-                sampled, await asyncio.gather(*(mapped_batch(batch_list[i], 1) for i in sampled))
-            ):
-                if second is not None:
-                    seconds[i] = second
-            sampled_rows = sum(len(batch_list[i]) for i in seconds)
-            sampled_disagreed = sum(
-                1
-                for i in seconds
-                for rid, _ in batch_list[i]
-                if firsts[i].get(str(rid)) != seconds[i].get(str(rid))
-            )
-            if sampled_rows and sampled_disagreed / sampled_rows > _VOTE_ESCALATE_RATE:
+            if self._cross_model:
+                # A different verify model is not a consistency spot-check but a
+                # deliberate quality upgrade: run it on every batch, no sampling.
                 vote_stats["escalated"] = True
-                remaining = [i for i in live if i not in seconds]
                 for i, second in zip(
-                    remaining,
-                    await asyncio.gather(*(mapped_batch(batch_list[i], 1) for i in remaining)),
+                    live,
+                    await asyncio.gather(*(mapped_batch(batch_list[i], 1) for i in live)),
                 ):
                     if second is not None:
                         seconds[i] = second
+            else:
+                step = max(1, len(live) // _VOTE_SAMPLE_BATCHES) if live else 1
+                sampled = live[::step][:_VOTE_SAMPLE_BATCHES]
+                for i, second in zip(
+                    sampled, await asyncio.gather(*(mapped_batch(batch_list[i], 1) for i in sampled))
+                ):
+                    if second is not None:
+                        seconds[i] = second
+                sampled_rows = sum(len(batch_list[i]) for i in seconds)
+                sampled_disagreed = sum(
+                    1
+                    for i in seconds
+                    for rid, _ in batch_list[i]
+                    if firsts[i].get(str(rid)) != seconds[i].get(str(rid))
+                )
+                if sampled_rows and sampled_disagreed / sampled_rows > _VOTE_ESCALATE_RATE:
+                    vote_stats["escalated"] = True
+                    remaining = [i for i in live if i not in seconds]
+                    for i, second in zip(
+                        remaining,
+                        await asyncio.gather(*(mapped_batch(batch_list[i], 1) for i in remaining)),
+                    ):
+                        if second is not None:
+                            seconds[i] = second
             vote_stats["second_pass"] = len(seconds)
 
             tie_batches = []
@@ -251,9 +291,16 @@ class SemanticMapTool(Tool):
         if covered < len(results):
             notes.append(f"{len(results) - covered} row(s) have NULL value; check them before aggregating.")
         if labels:
-            mode = (
-                "escalated to a full second pass" if vote_stats["escalated"] else "sampled check only"
-            )
+            if self._cross_model:
+                arbiter = self._arbiter_model or self._model
+                mode = (
+                    f"cross-model: second pass by {self._verify_model}, "
+                    f"disagreements decided by {arbiter or 'the session model'}"
+                )
+            else:
+                mode = (
+                    "escalated to a full second pass" if vote_stats["escalated"] else "sampled check only"
+                )
             notes.append(
                 f"label voting ({vote_stats['second_pass']} batch(es) double-annotated, {mode}): "
                 f"{vote_stats['disagreed']} row(s) disagreed "
@@ -295,11 +342,15 @@ class SemanticMapTool(Tool):
             f"ITEMS:\n{json.dumps(items, ensure_ascii=False)}"
         )
         try:
+            # Cross-model verification draws its diversity from the model
+            # identity, so the verify channel runs cold; same-model voting
+            # keeps the temperature split that gives it independent samples.
+            temperature = 0.0 if variant == 1 and self._cross_model else _VARIANT_TEMPERATURE[variant]
             response = await self._provider.chat(
                 messages=[{"role": "user", "content": prompt}],
-                model=self._model,
+                model=self._variant_model(variant),
                 max_tokens=_MAX_RESPONSE_TOKENS,
-                temperature=_VARIANT_TEMPERATURE[variant],
+                temperature=temperature,
             )
         except Exception:
             return None
@@ -345,4 +396,10 @@ def make_semantic_map_tool(ctx: PluginContext) -> Tool | None:
         kernel_python=config.get("kernel_python") or None,
         extension_dir=config.get("duckdb_extension_dir") or None,
     )
-    return SemanticMapTool(session, provider, model=config.get("semantic_map_model") or None)
+    return SemanticMapTool(
+        session,
+        provider,
+        model=config.get("semantic_map_model") or None,
+        verify_model=config.get("semantic_map_verify_model") or None,
+        arbiter_model=config.get("semantic_map_arbiter_model") or None,
+    )

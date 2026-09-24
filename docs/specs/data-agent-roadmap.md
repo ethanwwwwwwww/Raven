@@ -23,6 +23,15 @@ PANCANCER 查询平面挂载缺口(R18b 遗留)已随 survey 三级降级修复�
 
 12ds **0.8475**(单次全量,R25);机制路线内第一,榜单位置 #2 与 #3 之间。已复现覆盖:R22-R24 全部增益题(crm q9/q12、music q1、GITHUB q2/q4、PATENTS q2/q3、yelp q1/q3/q4/q5/q6)。**未做完整 12ds 复现**(预算),故 0.8475 为单次测量,带宽未定。剩余可动空间:agnews(0.300,吞吐/打标质量,成本最高)、DEPS q1、GITHUB q1(已出范围)、PANCANCER q1(已出范围)。
 
+## 冲榜进展(2026-08-20,R29-R31)
+
+**当前最高:12ds 0.8700**(R31 全量,270/270,审计全绿)——越过 #2 Sentinel 0.8617,距 #1 EQ 0.8713 差 0.0013(约一签)。
+
+- **exclusion_basis 门**(第 6 交付门):DEPS q1 0/5 → 1/5(哨兵轮 2/3,合并 37.5%);瓶颈是"注明依据"可用散文糊过去 → R32 升级为引用存储盖章值的义务。
+- **跨模型级联**(semantic_map verify=sonnet / arbiter=opus,config 门控):agnews 0.300 → 0.600(q4 满分、q2 2/5);成本 ~$100/全量轮,常规迭代应关。
+- **剩余可动空间**(按期望值):DEPS q1 转化率(1/5 → 3-4/5 = +0.017-0.025,唯一确定性靶)、GITHUB q2 的 fuzzy 掷币(3/5 → 5/5 = +0.0083,非机制)、crm q3/q12 flaky 回摆(+0.008)。**已出范围**:agnews q2/q3、GITHUB q1、PANCANCER q1。
+- **预算现实**:全量轮 ~$310(含级联),靶向轮 ~$12;冲线需在 DEPS q1 钉稳后再跑一次全量。
+
 ## 基建(不影响分数归因)
 
 - ~~box 的 DataAgentBench checkout 同步到最新 main~~ 已完成(9d6f64c,新 DEPS q1 validator 官方版,GITHUB q2 新题面)。**注意:该 checkout 的 query_dataset 文件是"下载数据覆盖 git 指针"形态,任何 reset/stash 操作都会把真数据打回指针——已踩过一次,靠 stash 外科恢复;动 checkout 前先保护 query_dataset。**

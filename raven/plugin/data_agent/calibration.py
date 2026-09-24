@@ -29,6 +29,8 @@ GATE_IDS = (
     "numbers_in_reason",
     "uncomputed_rejections",
     "unmeasured_exclusions",
+    "exclusion_basis",
+    "conjunctive_request",
 )
 
 

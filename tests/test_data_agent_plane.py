@@ -321,6 +321,56 @@ async def test_semantic_map_open_extraction_stays_single_pass(session):
     assert provider.calls == 1
 
 
+async def test_semantic_map_cross_model_verify_routes_and_arbitrates(session):
+    from raven.plugin.data_agent.semantic_map import SemanticMapTool
+
+    class RoutingProvider:
+        def __init__(self):
+            self.models = []
+
+        async def chat(self, messages, model=None, max_tokens=0, temperature=0.0):
+            import json as _json
+            from types import SimpleNamespace
+
+            self.models.append(model)
+            prompt = messages[0]["content"]
+            items = _json.loads(prompt.split("ITEMS:\n", 1)[1])
+            verify = "second, independent" in prompt
+            arbiter = "deciding annotator" in prompt
+            payload = []
+            for it in items:
+                # The verify and arbiter models both read row 7 differently
+                # from the base labeler, so majority overturns the base label.
+                if (verify or arbiter) and it["id"] == "7":
+                    payload.append({"id": it["id"], "value": "flip"})
+                else:
+                    payload.append({"id": it["id"], "value": "keep"})
+            return SimpleNamespace(content=_json.dumps(payload))
+
+    ids = [[str(i), f"text {i}"] for i in range(450)]
+    session.put_rows("cross_rows", ["rid", "body"], ids)
+    provider = RoutingProvider()
+    tool = SemanticMapTool(
+        session, provider, model="fast", verify_model="strong", arbiter_model="strongest"
+    )
+    assert tool._cross_model
+    assert not SemanticMapTool(session, provider, model="fast", verify_model="fast")._cross_model
+    out = await tool.execute(
+        table="cross_rows",
+        id_column="rid",
+        text_column="body",
+        task="keep or flip",
+        labels=["keep", "flip"],
+        output_table="crossed",
+    )
+    assert "450 rows, 450 with a value" in out
+    assert "cross-model: second pass by strong" in out and "decided by strongest" in out
+    # 5 first-pass batches + 5 full (unsampled) verify batches + 1 arbitration.
+    assert provider.models == ["fast"] * 5 + ["strong"] * 5 + ["strongest"]
+    flipped = await dat.SqlTool(session).execute("SELECT value FROM crossed WHERE id = '7'")
+    assert "flip" in flipped
+
+
 async def test_resolve_entities_clusters_variants(session):
     from raven.plugin.data_agent.entity_resolution import ResolveEntitiesTool
 
@@ -1038,7 +1088,13 @@ async def test_submit_answer_requires_measured_self_imposed_exclusions(tmp_path)
     from raven.plugin.data_agent.deliver import SubmitAnswerTool
     import json as _json
 
-    tool = SubmitAnswerTool(answer_path=str(tmp_path / "answer.txt"), profile=STRICT)
+    question = tmp_path / "q.txt"
+    question.write_text("Name the five highest-scoring entries.", encoding="utf-8")
+    tool = SubmitAnswerTool(
+        answer_path=str(tmp_path / "answer.txt"),
+        question_path=str(question),
+        profile=STRICT,
+    )
     base = dict(
         rows=["alpha 9", "beta 8", "gamma 7", "delta 6", "epsilon 5"],
         selected_reading="rank entries by the stored score, all entries eligible",
@@ -1050,16 +1106,211 @@ async def test_submit_answer_requires_measured_self_imposed_exclusions(tmp_path)
     assert "REFUSED" in out and "declared without measurement" in out
     assert not (tmp_path / "answer.txt").exists()
 
-    out = await tool.execute(
+    measured = dict(
         **base,
         excluded_populations=[
             "dropped 10941 entries whose name looked synthetic; keeping them changes "
             "the top 5 to a different set of 5"
         ],
     )
+    out = await tool.execute(**measured)
+    assert "REFUSED" in out and "two bases" in out
+    assert not (tmp_path / "answer.txt").exists()
+
+    # Same rows again: the basis check gets one final pass, then stands down.
+    out = await tool.execute(**measured)
+    assert "REFUSED" in out and "same rows the last refusal returned" in out
+
+    out = await tool.execute(**measured)
     assert "wrote 5 rows" in out
     record = _json.loads((tmp_path / "adjudication.json").read_text())
     assert record["excluded_populations"] and "10941" in record["excluded_populations"][0]
+
+
+async def test_submit_answer_exclusion_basis_gate_fires_once_and_warns_in_general(tmp_path):
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+
+    args = dict(
+        rows=["alpha 9", "beta 8"],
+        selected_reading="rank by stored score, synthetic-looking names dropped",
+        rejected_readings=["keep all rows: top becomes zeta 11"],
+        reason="dropped 120 of 890 rows; with them the leader flips, margin 2 vs 21",
+        excluded_populations=["dropped 120 rows with concatenated identifiers; answer flips"],
+    )
+    question = tmp_path / "q.txt"
+    question.write_text("Name the two highest-scoring entries.", encoding="utf-8")
+    strict = SubmitAnswerTool(
+        answer_path=str(tmp_path / "a.txt"), question_path=str(question), profile=STRICT
+    )
+    out = await strict.execute(**args)
+    assert "REFUSED" in out and "store itself classifies them as" in out
+    out = await strict.execute(**args)
+    assert "REFUSED" in out and "same rows the last refusal returned" in out
+    out = await strict.execute(**args)
+    assert "wrote 2 rows" in out
+
+    general = SubmitAnswerTool(answer_path=str(tmp_path / "b.txt"), question_path=str(question))
+    out = await general.execute(**args)
+    assert "wrote 2 rows" in out and "ADVISORY" in out and "two bases" in out
+
+
+async def test_submit_answer_refuses_half_of_a_two_part_question(tmp_path):
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+
+    question = tmp_path / "q.txt"
+    question.write_text(
+        "Identify the repository with the most contributors and the file in it "
+        "that changed most often.",
+        encoding="utf-8",
+    )
+    args = dict(
+        selected_reading="rank repositories by distinct contributor count",
+        rejected_readings=["commit-weighted contributors: same winner, 3211 commits"],
+        reason="contributor column populated on 8140 of 8140 rows; margin 214 over runner-up",
+        excluded_populations=[],
+    )
+    tool = SubmitAnswerTool(
+        answer_path=str(tmp_path / "a.txt"), question_path=str(question), profile=STRICT
+    )
+    out = await tool.execute(rows=["octo/hello-world"], **args)
+    assert "REFUSED" in out and "more than one thing to report" in out
+    assert not (tmp_path / "a.txt").exists()
+
+    # Fires once: a resubmission the agent stands behind goes through.
+    out = await tool.execute(rows=["octo/hello-world"], **args)
+    assert "wrote 1 rows" in out
+
+    # A row that carries both fields never trips it.
+    fresh = SubmitAnswerTool(
+        answer_path=str(tmp_path / "b.txt"), question_path=str(question), profile=STRICT
+    )
+    out = await fresh.execute(rows=["octo/hello-world, src/main.py (41 changes)"], **args)
+    assert "wrote 1 rows" in out
+
+    # Neither does a single-value answer to a single-request question.
+    single = tmp_path / "q2.txt"
+    single.write_text("Which warehouse shipped the most pallets?", encoding="utf-8")
+    other = SubmitAnswerTool(
+        answer_path=str(tmp_path / "c.txt"), question_path=str(single), profile=STRICT
+    )
+    out = await other.execute(rows=["Northgate Depot"], **args)
+    assert "wrote 1 rows" in out
+
+
+async def test_submit_answer_refuses_a_reworded_resubmission_of_the_same_exclusion(tmp_path):
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+
+    question = tmp_path / "q.txt"
+    question.write_text("Name the three highest-scoring entries.", encoding="utf-8")
+    tool = SubmitAnswerTool(
+        answer_path=str(tmp_path / "a.txt"), question_path=str(question), profile=STRICT
+    )
+    rows = ["alpha 9", "beta 8", "gamma 7"]
+    base = dict(
+        rows=rows,
+        selected_reading="rank by stored score, concatenated identifiers dropped",
+        rejected_readings=["keeping them: top becomes zeta 11"],
+        reason="dropped 120 of 890 rows; with them the leader flips, margin 2 vs 21",
+    )
+    out = await tool.execute(**base, excluded_populations=["dropped 120 rows with odd ids; answer flips"])
+    assert "REFUSED" in out and "two bases" in out
+
+    # Same rows, reworded justification: refused once more, and told why.
+    out = await tool.execute(
+        **base, excluded_populations=["removed 120 malformed-looking identifiers; answer flips"]
+    )
+    assert "REFUSED" in out and "same rows the last refusal returned" in out
+    assert not (tmp_path / "a.txt").exists()
+
+    # Third pass stands, whatever the agent decided -- no deadlock.
+    out = await tool.execute(**base, excluded_populations=["dropped 120 rows with odd ids; answer flips"])
+    assert "wrote 3 rows" in out
+
+
+async def test_submit_answer_second_exclusion_refusal_defers_to_a_quoted_condition(tmp_path):
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+
+    question = tmp_path / "q.txt"
+    question.write_text(
+        "Identify the busiest depot and the pallet it shipped most often, counting "
+        "only pallets that carry a scan record in the scans table.",
+        encoding="utf-8",
+    )
+    rows = ["Northgate Depot", "PAL-4471", "38 shipments"]
+    base = dict(
+        rows=rows,
+        selected_reading="rank depots by scanned shipments",
+        rejected_readings=["unscanned pallets included: 41 shipments, different pallet"],
+        reason="scan join keeps 902 of 1204 rows; runner-up margin 11 shipments",
+    )
+    tool = SubmitAnswerTool(
+        answer_path=str(tmp_path / "a.txt"), question_path=str(question), profile=STRICT
+    )
+    out = await tool.execute(**base, excluded_populations=["dropped 302 unscanned rows; answer changes"])
+    assert "REFUSED" in out and "two bases" in out
+
+    # Same rows, but now the entry quotes the question's own condition: the
+    # second pass stands down instead of pushing a correct answer off itself.
+    out = await tool.execute(
+        **base,
+        excluded_populations=[
+            "302 rows dropped: the question says 'only pallets that carry a scan "
+            "record in the scans table', and these have none"
+        ],
+    )
+    assert "wrote 3 rows" in out
+
+
+async def test_submit_answer_second_exclusion_refusal_fires_on_unquoted_rewording(tmp_path):
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+
+    question = tmp_path / "q.txt"
+    question.write_text(
+        "Which packages are the top 5 most popular by star count, and their versions?",
+        encoding="utf-8",
+    )
+    rows = ["alpha 9", "beta 8", "gamma 7"]
+    base = dict(
+        rows=rows,
+        selected_reading="rank by stored score, concatenated identifiers dropped",
+        rejected_readings=["keeping them: top becomes zeta 11"],
+        reason="dropped 120 of 890 rows; with them the leader flips, margin 2 vs 21",
+    )
+    tool = SubmitAnswerTool(
+        answer_path=str(tmp_path / "a.txt"), question_path=str(question), profile=STRICT
+    )
+    out = await tool.execute(**base, excluded_populations=["dropped 120 rows with odd ids; answer flips"])
+    assert "REFUSED" in out and "two bases" in out
+
+    # Reworded in the agent's own words -- including a paraphrase of the
+    # question -- still gets the second pass.
+    out = await tool.execute(
+        **base,
+        excluded_populations=[
+            "120 composite identifiers removed, as required by the question's "
+            "popularity metric; they carry NULL timestamps and empty hashes"
+        ],
+    )
+    assert "REFUSED" in out and "no entry quotes the question" in out
+    out = await tool.execute(**base, excluded_populations=["dropped 120 rows with odd ids; answer flips"])
+    assert "wrote 3 rows" in out
+
+
+async def test_submit_answer_second_exclusion_refusal_skipped_when_rows_change(tmp_path):
+    from raven.plugin.data_agent.deliver import SubmitAnswerTool
+
+    tool = SubmitAnswerTool(answer_path=str(tmp_path / "a.txt"), profile=STRICT)
+    base = dict(
+        selected_reading="rank by stored score",
+        rejected_readings=["keeping them: top becomes zeta 11"],
+        reason="dropped 120 of 890 rows; with them the leader flips, margin 2 vs 21",
+        excluded_populations=["dropped 120 rows with odd ids; answer flips"],
+    )
+    out = await tool.execute(rows=["alpha 9", "beta 8"], **base)
+    assert "REFUSED" in out and "two bases" in out
+    # Recomputed answer: the refusal did its job, so it does not fire again.
+    out = await tool.execute(rows=["zeta 11", "alpha 9"], **base)
+    assert "wrote 2 rows" in out
 
 
 def test_submit_answer_contract_names_self_imposed_exclusions():
